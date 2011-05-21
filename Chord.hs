@@ -1,7 +1,8 @@
-{-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards #-}
-module Main where
+{-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
+module Chord where
 
 import Remote.Call
+import Remote.Channel
 import Remote.Peer
 import Remote.Process
 import Remote.Init
@@ -15,7 +16,8 @@ import Data.List hiding (break)
 import Data.IORef
 import Data.Array.IO
 import Data.Array
-import Control.Monad.State
+import Data.Typeable
+import Control.Monad.State (liftIO)
 
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -24,16 +26,72 @@ import qualified Data.Map as Map
 import Data.Digest.Pure.SHA
 import Data.Binary
 
-import DataTypes
---import Logic
+--{{{ Data type and type class definitions
+-- | NodeState, carries all important state variables
+data NodeState = NodeState {
+          self :: Contact
+        , fingerTable :: Map.Map Integer Contact -- ^ The fingerTable
+        , predecessor :: Contact
+        , timeout :: Int -- ^ The timout latency of ping
+        , m :: Int -- ^ The number of bits in a key, ususaly 160
+        , alpha :: Int -- ^ The number of parralell queries
+        , bootstrapNode :: Contact -- ^ A node in the network
+        } deriving (Show)
+instance Eq NodeState where
+    (==) st1 st2 = ((self st1) == (self st2)) && 
+                   ((fingerTable st1) == (fingerTable st2)) &&
+                   ((predecessor st1) == (predecessor st2))
+    (/=) st1 st2 = not $ (==) st1 st2
 
-data RspFndSucc = RspFndSucc NodeId
-data FndSucc = FndSucc ProcessId
+successor :: NodeState -> Maybe Contact
+successor st = helper st 1
+    where helper st k
+            | fromIntegral k > (m st) = Nothing
+            | Just c <- Map.lookup k (fingerTable st) = Just c
+            | otherwise = helper st (k+1)
 
-cNodeId node = integerDigest . sha1 $ encode node
+type Key = Integer
 
--- | Shuld return the successor of US if the key asked for is BETWEEN us an the successor
-hasSuccessor :: TVar NodeState -> Key -> STM (Maybe NodeId)
+data Contact = Contact NodeId (SendPort FndMsg) deriving (Typeable)
+instance Show Contact where
+    show (Contact n p) = show n
+instance Eq Contact where
+   (==) (Contact a _) (Contact b _) = a == b
+
+instance Binary Contact where
+  put (Contact id p) = put id >> put p
+  get = do
+          id <- get
+          p  <- get
+          return (Contact id p)
+
+data FndMsg = FndSucc ProcessId Key | RspFndSucc Contact deriving (Show, Typeable)
+instance Binary FndMsg where
+   put (FndSucc p k) = do
+                         put (0 :: Word8)
+                         put p
+                         put k
+   put (RspFndSucc c) = do
+                         put (1 :: Word8)
+                         put c
+   get = do
+           flag <- getWord8
+           case flag of
+             0 -> do
+                   p <- get
+                   k <- get
+                   return (FndSucc p k)
+             1 -> do
+                   c <- get
+                   return (RspFndSucc c)
+
+cNodeId (Contact n _) = integerDigest . sha1 $ encode n
+nodeId (Contact nid _) = nid
+cPort (Contact _ p) = p
+--}}}
+
+-- | Shuld return the successor of US if the key asked for is BETWEEN us and the successor
+hasSuccessor :: TVar NodeState -> Key -> STM (Maybe Contact)
 hasSuccessor tVarSt key = do
    st <- readTVar tVarSt
    let n = cNodeId (self st)
@@ -49,7 +107,7 @@ closestPreceding tvarSt key = do
   st <- readTVar tvarSt
   return $ helper st (fingerTable st) key (fromIntegral . m $ st)
 
-helper :: (Ord k, Num k) => NodeState -> Map.Map k NodeId -> Key -> k -> NodeId
+helper :: (Ord k, Num k) => NodeState -> Map.Map k Contact -> Key -> k -> Contact
 helper st conts key 0 = error "error in closest node"
 helper st conts key n
   | Map.null conts = (self st)
@@ -72,41 +130,54 @@ lookopAndIf f m k
 -- | someone asks you for a successor, if you know it you reply to the original caller,
 -- | else you relay the query forward
 relayFndSucc :: TVar NodeState -> ProcessId -> Key -> ProcessM ()
-relayFndSucc st caller key = do
-  successor <- liftIO $ atomically (hasSuccessor st key)
+relayFndSucc tSt caller key = do
+  successor <- liftIO . atomically $ hasSuccessor tSt key
   case successor of
       (Just suc) -> send caller (RspFndSucc suc) -- send the ORIGINAL caller the answer.
       _ -> do
-          recv <- liftIO . atomically $ closestPreceding st key -- | find the next to relay to
-          let remFndSucc = do ($(mkClosure 'relayFndSucc) caller (FndSucc key)) -- | make the remote call
-          spawn recv remFndSucc
-remotable ['relayFndSucc ]
+          recv <- liftIO . atomically $ closestPreceding tSt key -- | find the next to relay to
+          let msg = FndSucc caller key 
+          sendChannel (cPort recv) msg
+
+bootStrapChord st bootNode = do
+    selfNodeId <- getSelfNode
+    (sendPort, receivePort) <- newChannel
+    let st = st {self = (Contact selfNodeId sendPort) }
+    tSt <- liftIO . atomically $ newTVar st
+    spawnLocal $ handleQueries tSt receivePort
+    --pi <- getPeers
+    --let testBoot = head $ findPeerByRole pi "CHORDNODE"
+    joinChord tSt bootNode -- testBoot
+
+handleQueries tSt port = do
+   (FndSucc pid key) <- receiveChannel port
+   spawnLocal $ relayFndSucc tSt pid key
+   handleQueries tSt port
 
 
-{--
+--joinChord :: TVar NodeState -> Contact -> STM (ProcessM ())
+joinChord tSt node = do
+    st <- liftIO . atomically $ readTVar tSt
+
+    selfPid <- getSelfPid
+    sendChannel (cPort node) (FndSucc selfPid (cNodeId . self $ st))
+    (RspFndSucc succ) <- expect -- ^ TODO should time out and retry
+
+    --buildFingers tSt succ
+    liftIO . atomically $ writeTVar tSt (st {fingerTable = (Map.insert 1 succ (fingerTable st)) })
+    return ()
+
 -- | YOU are wordering who's the successor of a certain key, if you don't know yourself
 -- | you relay it forward with YOU as the original caller.
-findSuccessor :: Integer -> ProcessM (Maybe RspFndSucc successor)
-findSuccessor st key
-  | False = return successor
-  | otherwise = do
-      self <- getSelfPid
-      let recv = closestPreceding st key -- ^ the first one to recieve our query
-          remFndSucc = do (relayFndSucc__closure self (FndSucc key)) -- ^ the function he runs
-      spawn recv remFndSucc
-      return receiveTimeout 10000 [return]
-
-findSuccessor ::  NodeState -> NodeId -> IO (Either String Contact)
-findSuccessor st id 
-  | (Just suc) <- successor st = do
-                         let n = cNodeId (self st)
-                         if ((n < id) && (id <= (cNodeId suc)))
-                             then return (Right suc)
-                             else do
-                                    let reciever = closestPrecdingNode st id
-                                    case reciever == suc of
-                                        True -> return (Right reciever)
-                                        False -> remoteFindSuccessor st reciever id
-  | otherwise = return $ Left "No fingers"
---}
-
+findSuccessor :: TVar NodeState -> ProcessId -> Key -> ProcessM Contact
+findSuccessor tSt caller key = do
+  successor <- liftIO . atomically $ hasSuccessor tSt key
+  case successor of
+      (Just suc) -> return suc -- You self have the successor for the node
+      _ -> do
+          selfPid <- getSelfPid -- ^ get your pid
+          recv <- liftIO . atomically $ closestPreceding tSt key -- | find the next to relay to
+          let msg = FndSucc selfPid key -- ^ Construct a message to send
+          sendChannel (cPort recv) msg  -- ^ Send it
+          (RspFndSucc succ) <- expect   -- ^ TODO should time out and retry
+          return succ
