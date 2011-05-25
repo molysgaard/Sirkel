@@ -17,7 +17,7 @@ import Data.IORef
 import Data.Array.IO
 import Data.Array
 import Data.Typeable
-import Control.Monad.State (liftIO)
+import qualified Control.Monad.State as St
 
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -102,9 +102,25 @@ hasSuccessor tVarSt key = do
                     then return (Just succ)
                     else return Nothing
 
+-- | Shuld return the successor of US if the key asked for is BETWEEN us and the successor
+hasSuccessorT :: Key -> St.StateT NodeState ProcessM (Maybe Contact)
+hasSuccessorT key = do
+   st <- St.get
+   let n = cNodeId (self st)
+       suc = successor st
+   case suc of
+     Nothing -> return Nothing
+     (Just succ) -> if ((n < key) && (key <= (cNodeId succ)))
+                    then return (Just succ)
+                    else return Nothing
+
 -- {{{ closestPrecedingNode
 closestPreceding tvarSt key = do
   st <- readTVar tvarSt
+  return $ helper st (fingerTable st) key (fromIntegral . m $ st)
+
+closestPrecedingT key = do
+  st <- St.get
   return $ helper st (fingerTable st) key (fromIntegral . m $ st)
 
 helper :: (Ord k, Num k) => NodeState -> Map.Map k Contact -> Key -> k -> Contact
@@ -131,19 +147,29 @@ lookopAndIf f m k
 -- | else you relay the query forward
 relayFndSucc :: TVar NodeState -> ProcessId -> Key -> ProcessM ()
 relayFndSucc tSt caller key = do
-  successor <- liftIO . atomically $ hasSuccessor tSt key
+  successor <- St.liftIO . atomically $ hasSuccessor tSt key
   case successor of
       (Just suc) -> send caller (RspFndSucc suc) -- send the ORIGINAL caller the answer.
       _ -> do
-          recv <- liftIO . atomically $ closestPreceding tSt key -- | find the next to relay to
+          recv <- St.liftIO . atomically $ closestPreceding tSt key -- | find the next to relay to
           let msg = FndSucc caller key 
           sendChannel (cPort recv) msg
+
+relayFndSuccT :: ProcessId -> Key -> St.StateT NodeState ProcessM ()
+relayFndSuccT caller key = do
+  successor <- hasSuccessorT key
+  case successor of
+      (Just suc) -> St.lift $ send caller (RspFndSucc suc) -- send the ORIGINAL caller the answer.
+      _ -> do
+          recv <- closestPrecedingT key -- | find the next to relay to
+          let msg = FndSucc caller key 
+          St.lift $ sendChannel (cPort recv) msg
 
 bootStrapChord st bootNode = do
     selfNodeId <- getSelfNode
     (sendPort, receivePort) <- newChannel
     let st = st {self = (Contact selfNodeId sendPort) }
-    tSt <- liftIO . atomically $ newTVar st
+    tSt <- St.liftIO . atomically $ newTVar st
     spawnLocal $ handleQueries tSt receivePort
     --pi <- getPeers
     --let testBoot = head $ findPeerByRole pi "CHORDNODE"
@@ -157,27 +183,42 @@ handleQueries tSt port = do
 
 --joinChord :: TVar NodeState -> Contact -> STM (ProcessM ())
 joinChord tSt node = do
-    st <- liftIO . atomically $ readTVar tSt
+    st <- St.liftIO . atomically $ readTVar tSt
 
     selfPid <- getSelfPid
     sendChannel (cPort node) (FndSucc selfPid (cNodeId . self $ st))
     (RspFndSucc succ) <- expect -- ^ TODO should time out and retry
 
     --buildFingers tSt succ
-    liftIO . atomically $ writeTVar tSt (st {fingerTable = (Map.insert 1 succ (fingerTable st)) })
+    St.liftIO . atomically $ writeTVar tSt (st {fingerTable = (Map.insert 1 succ (fingerTable st)) })
     return ()
 
 -- | YOU are wordering who's the successor of a certain key, if you don't know yourself
 -- | you relay it forward with YOU as the original caller.
 findSuccessor :: TVar NodeState -> ProcessId -> Key -> ProcessM Contact
 findSuccessor tSt caller key = do
-  successor <- liftIO . atomically $ hasSuccessor tSt key
+  successor <- St.liftIO . atomically $ hasSuccessor tSt key
   case successor of
       (Just suc) -> return suc -- You self have the successor for the node
       _ -> do
           selfPid <- getSelfPid -- ^ get your pid
-          recv <- liftIO . atomically $ closestPreceding tSt key -- | find the next to relay to
+          recv <- St.liftIO . atomically $ closestPreceding tSt key -- | find the next to relay to
           let msg = FndSucc selfPid key -- ^ Construct a message to send
           sendChannel (cPort recv) msg  -- ^ Send it
           (RspFndSucc succ) <- expect   -- ^ TODO should time out and retry
+          return succ
+
+-- | YOU are wordering who's the successor of a certain key, if you don't know yourself
+-- | you relay it forward with YOU as the original caller.
+findSuccessorT :: ProcessId -> Key -> St.StateT NodeState ProcessM Contact
+findSuccessorT caller key = do
+  successor <- hasSuccessorT key
+  case successor of
+      (Just suc) -> return suc -- You self have the successor for the node
+      _ -> do
+          selfPid <- St.lift getSelfPid -- ^ get your pid
+          recv <- closestPrecedingT key -- | find the next to relay to
+          let msg = FndSucc selfPid key -- ^ Construct a message to send
+          St.lift $ sendChannel (cPort recv) msg  -- ^ Send it
+          (RspFndSucc succ) <- St.lift expect   -- ^ TODO should time out and retry
           return succ
