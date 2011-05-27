@@ -129,22 +129,39 @@ lookopAndIf f m k
   | otherwise = Nothing
 -- }}}
 
+data PassState = GetState ProcessId | PutState NodeState | RetState NodeState deriving (Show, Typeable)
+
+getState :: ProcessM NodeState
+getState = do nodeId <- getSelfNode
+              let process = ProcessId nodeId 7
+              pid <- getSelfPid
+              send process (GetState pid)
+              (RetState a) <- expect
+              return a
+
+putState :: NodeState -> ProcessM ()
+putState st = do nodeId <- getSelfNode
+                 let process = ProcessId nodeId 7
+                 send process (PutState st)
+
 -- | someone asks you for a successor, if you know it you reply to the original caller,
 -- | else you relay the query forward
-relayFndSucc :: ProcessId -> Key -> ProcessM ()
-relayFndSucc caller key = do
+relayFndSucc :: (ProcessId, Key) -> ProcessM ()
+relayFndSucc (caller, key) = do
   st <- getState
   case (hasSuccessor st key) of
       (Just suc) -> send caller (RspFndSucc suc) -- send the ORIGINAL caller the answer.
       _ -> do
           recv <- closestPreceding st key -- | find the next to relay to
-          let msg = $(mkClosure 'relayFndSucc) caller key
-          spawn recv msg
+          selfClosure <- makeClosure "Chord.relayFndSucc__impl" (caller, key)
+          spawn recv selfClosure
 	  return ()
+
+$( remotable ['relayFndSucc] )
 
 handleQueries port = do
    (FndSucc pid key) <- receiveChannel port
-   spawnLocal $ relayFndSucc pid key
+   spawnLocal $ relayFndSucc (pid, key)
    handleQueries port
 
 joinChord :: NodeId -> ProcessM ()
@@ -174,7 +191,7 @@ findSuccessor caller key = do
           (RspFndSucc succ) <- expect   -- ^ TODO should time out and retry
           return succ
 
-data PassState = GetState ProcessId | PutState NodeState | RetState NodeState deriving (Show, Typeable)
+
 
 instance Binary PassState where
   put (GetState pid) = do put (0 :: Word8)
@@ -202,18 +219,3 @@ handleState st = do
   handleState updSt
   where hsGet (GetState pid) = send pid (RetState st) >> return st
         hsGet (PutState nSt) = return nSt
-
-getState :: ProcessM NodeState
-getState = do nodeId <- getSelfNode
-              let process = ProcessId nodeId 7
-              pid <- getSelfPid
-              send process (GetState pid)
-              (RetState a) <- expect
-              return a
-
-putState :: NodeState -> ProcessM ()
-putState st = do nodeId <- getSelfNode
-                 let process = ProcessId nodeId 7
-                 send process (PutState st)
-
-$( remotable ['relayFndSucc] )
