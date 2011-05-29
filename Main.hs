@@ -114,17 +114,17 @@ between n a b
 
 -- {{{ addFinger
 addFinger :: NodeId -> NodeState -> NodeState
-addFinger cont st = st {fingerTable = foldl pred (fingerTable st) [1..(fromIntegral $ m st)]}
-    where pred a b
-            | Just True <- liftM (\x -> cNodeId x > c) $ Map.lookup b a -- Is the new node closer?
-            , let fv = fingerVal st b in (cont /= (self st)) && (between c fv n)
-            = Map.insert b cont a
-            | Nothing <- liftM (\x -> cNodeId x > c) $ Map.lookup b a -- Is the new node closer?
-            , let fv = fingerVal st b in (cont /= (self st)) && (between c fv n)
-            = Map.insert b cont a
-            | otherwise = a
+addFinger newFinger st = st {fingerTable = foldl pred (fingerTable st) [1..(fromIntegral $ m st)]}
+    where pred ft i
+            | Just prevFinger <- Map.lookup i ft -- there exists a node in the fingertable, is the new on ecloser?
+            , let fv = fingerVal st i in (cNodeId prevFinger > c) && (newFinger /= (self st)) && (between c fv n)
+            = Map.insert i newFinger ft
+            | Nothing <- Map.lookup i ft -- there is no node, we just put it in if it fits
+            , let fv = fingerVal st i in (newFinger /= (self st)) && (between c fv n)
+            = Map.insert i newFinger ft
+            | otherwise = ft
 
-          c = cNodeId cont
+          c = cNodeId newFinger
           n = cNodeId (self st)
 
 fingerVal ::  (Integral a) => NodeState -> a -> Integer
