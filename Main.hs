@@ -22,6 +22,7 @@ import Control.Monad.IO.Class (liftIO)
 
 import Control.Concurrent (threadDelay)
 import qualified Data.Map as Map
+import Data.List (foldl')
 
 import Data.Digest.Pure.SHA
 import Data.Binary
@@ -114,7 +115,7 @@ between n a b
 
 -- {{{ addFinger
 addFinger :: NodeId -> NodeState -> NodeState
-addFinger newFinger st = st {fingerTable = foldl pred (fingerTable st) [1..(fromIntegral $ m st)]}
+addFinger newFinger st = st {fingerTable = foldl' pred (fingerTable st) [1..(fromIntegral $ m st)]}
     where pred ft i
             | Just prevFinger <- Map.lookup i ft -- there exists a node in the fingertable, is the new on ecloser?
             , let fv = fingerVal st i in (cNodeId prevFinger > c) && (newFinger /= (self st)) && (between c fv n)
@@ -221,6 +222,7 @@ joinChord node = do
 
 --nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
 
+-- FOR SOME REASON THIS ONE GIVES THE SAME SUCCESSOR TIME AFTER TIME?
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
   st <- getState
@@ -276,7 +278,7 @@ buildFingers buildNode = do
                           nodids = map fsid r
                           r = [1 .. (fromIntegral . m $ st)]
                       fingers <- sequence $ map f nodids
-                      let newSt = foldl (\st' nod -> addFinger nod st') st fingers
+                      let newSt = foldl' (\st' nod -> addFinger nod st') st fingers
                       return newSt
 -- }}}
 
