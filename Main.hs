@@ -75,7 +75,7 @@ type Key = Integer
 cNodeId n = integerDigest . sha1 $ encode n
 --}}}
 
--- | Shuld return the successor of US if the key asked for is BETWEEN us and the successor
+-- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
 hasSuccessor :: NodeState -> Key -> Maybe NodeId
 hasSuccessor st key
   | Map.null (fingerTable st) = Nothing
@@ -109,7 +109,7 @@ lookopAndIf f m k
 -- }}}
 
 between n a b
-  | a == b = n /= a -- error "n can't be between a and b when a == b"
+  | a == b = error "n can't be between a and b when a == b" -- can't be alike
   | (a < b) = (a < n) && (n < b)
   | (b < a) = not $ between n (b-1) (a+1)
 
@@ -118,7 +118,7 @@ addFinger :: NodeId -> NodeState -> NodeState
 addFinger newFinger st = st {fingerTable = foldl' pred (fingerTable st) [1..(fromIntegral $ m st)]}
     where pred ft i
             | Just prevFinger <- Map.lookup i ft -- there exists a node in the fingertable, is the new on ecloser?
-            , let fv = fingerVal st i in (cNodeId prevFinger > c) && (newFinger /= (self st)) && (between c fv n)
+            , let fv = fingerVal st i in (between c fv (cNodeId prevFinger)) && (newFinger /= (self st)) && (between c fv n)
             = Map.insert i newFinger ft
             | Nothing <- Map.lookup i ft -- there is no node, we just put it in if it fits
             , let fv = fingerVal st i in (newFinger /= (self st)) && (between c fv n)
@@ -175,9 +175,10 @@ relayFndSucc :: (NodeId, ProcessId, Key) -> ProcessM ()
 relayFndSucc (nid, caller, key) = do
   st' <- getState
   let st = addFinger (nodeFromPid caller) (addFinger nid st')
+      x = 2^(fromIntegral $ m st)
   putState st
   case (hasSuccessor st key) of
-      (Just suc) -> say ("hasSucc: " ++ (show suc)) >> send caller suc -- If we only are two in the ring, we will send ourselves
+      (Just suc) -> say ((show . (/x) . fromIntegral . cNodeId . self $ st) ++ " hasSucc: " ++ (show . (/x) . fromIntegral $ key) ++ " = " ++ (show . (/x) . fromIntegral . cNodeId $ suc)) >> send caller suc -- If we only are two in the ring, we will send ourselves
       _ -> do
           recv <- closestPreceding st key -- | find the next to relay to
           case recv == (nodeFromPid caller) of
@@ -210,9 +211,8 @@ joinChord :: NodeId -> ProcessM ()
 joinChord node = do
     st <- getState
     succ <- remoteFindSuccessor node (cNodeId . self $ st)
-    --say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node)) -- checked, no problem any longer
-    updSt <- buildFingers succ
-    putState $ addFinger succ updSt
+    say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node)) -- checked, no problem any longer
+    buildFingers succ
     sst <- getState
     --say $ "Finish join: " ++ (show . nils . fingerTable $ sst)
     let suc = successor sst
@@ -266,20 +266,23 @@ remoteFindSuccessor node key = do
   succ <- receiveTimeout 5000 [match (\x -> return x)] :: ProcessM (Maybe NodeId) -- ^ TODO should time out and retry
   case succ of
     Nothing -> say "Timed out, retrying" >> remoteFindSuccessor node key
-    Just c -> return c
+    Just c -> do
+                st' <- getState
+                let uSt = addFinger c st'
+                putState uSt
+                return c
 
 -- {{{ buildFingers
-buildFingers :: NodeId -> ProcessM NodeState
+buildFingers :: NodeId -> ProcessM ()
 buildFingers buildNode = do
                       st <- getState
                       nodeId <- getSelfNode
                       let f = remoteFindSuccessor buildNode
-                          fsid i = (cNodeId (self st)) + (2 ^ (i - 1))
+                          fsid i = fingerVal st i
                           nodids = map fsid r
                           r = [1 .. (fromIntegral . m $ st)]
                       fingers <- sequence $ map f nodids
-                      let newSt = foldl' (\st' nod -> addFinger nod st') st fingers
-                      return newSt
+                      return ()
 -- }}}
 
 bootStrap st _ = do
