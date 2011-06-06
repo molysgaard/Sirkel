@@ -2,12 +2,14 @@
 module Main where
 
 -- | TODO
--- There is some fail in the algorithm that makes nodes relay in circles
--- There is something wrong with the loops
--- THE PROBLEM IS THE < and > opperators. Remember we are checking for a ring, not a line!
--- Error handeling, timeouts!
--- Two nodes works ok, three and more does not converge i think, hard to debug
--- for some reason nodes with small ids always end up as the successor for all nodes?!
+-- When a node never responds, it should be removed from the fingertable, maybe actively replaced?
+--
+-- When a node joins, it very often get it self as it's successor, that's _never_ correct for joins, only lookups to keys
+-- Though this bug exists, fingerTables are never corrupted, converging takes i bit more time though
+--
+-- When a node joins, it makes 160 _sequenced_ lookups, these are to discover what nodes are on the net.
+-- If the lookup times out, it's going to take 160*timeout for it to complete and leave 160 "Timeout" messages
+-- in the logs
 
 import Remote.Call
 import Remote.Channel
@@ -40,7 +42,6 @@ data NodeState = NodeState {
         , predecessor :: NodeId
         , timeout :: Int -- ^ The timout latency of ping
         , m :: Integer -- ^ The number of bits in a key, ususaly 160
-        , alpha :: Int -- ^ The number of parralell queries
         } deriving (Show)
 instance Eq NodeState where
     (==) st1 st2 = ((self st1) == (self st2)) && 
@@ -55,14 +56,12 @@ instance Binary NodeState where
 	     put (predecessor a)
 	     put (timeout a)
 	     put (m a)
-	     put (alpha a)
   get = do se <- get
            ft <- get
 	   pr <- get
 	   ti <- get
 	   m <- get
-	   a <- get
-	   return (NodeState { self = se, fingerTable = ft, predecessor = pr, timeout = ti, m=m, alpha=a })
+	   return (NodeState { self = se, fingerTable = ft, predecessor = pr, timeout = ti, m=m })
 
 successor :: NodeState -> Maybe NodeId
 successor st = helper st 1 --Map.lookup 1 (fingerTable st)
@@ -107,6 +106,7 @@ lookopAndIf f m k
   | otherwise = Nothing
 -- }}}
 
+-- | is n in the domain of (a, b) ?
 between :: Integer -> Integer -> Integer -> Bool
 between n a b
   | a == b = n /= a --error "n can't be between a and b when a == b" -- can't be alike
@@ -114,6 +114,7 @@ between n a b
   | (b < a) = not $ between n (b-1) (a+1)
 
 -- {{{ addFinger
+-- | Adds a finger to the fingertable. If there already exists a finger they are compared to see who's the best fit.
 addFinger :: NodeId -> NodeState -> NodeState
 addFinger newFinger st = st {fingerTable = foldl' pred (fingerTable st) [1..(m st)]}
     where pred ft i
@@ -178,27 +179,32 @@ relayFndSucc (nid, caller, key) = do
       x = 2^(m st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
+      sh :: Integer -> String
+      sh = (take 5) . show
   putState st
   case (hasSuccessor st key) of
-      (Just suc) -> say ((show . fm . cNodeId . self $ st) ++ " hasSucc: " ++ (show . fm $ key) ++ " = " ++ (show . fm . cNodeId $ suc)) >> send caller suc -- If we only are two in the ring, we will send ourselves
+      (Just suc) -> do 
+             --say ((sh . fm . cNodeId . self $ st) ++ " hasSucc: " ++ (sh . fm $ key) ++ " = " ++ (sh . fm . cNodeId $ suc))
+             send caller (suc, key) -- If we only are two in the ring, we will send ourselves
       _ -> do
           recv <- closestPreceding st key -- | find the next to relay to
           case recv == (nodeFromPid caller) of
             False -> do selfClosure <- makeClosure "Main.relayFndSucc__impl" (self st, caller, key)
                         case recv == (self st) of
                           False -> do
-                            spawn recv selfClosure
+                            spawn recv $(mkClosureRec 'relayFndSucc )
 	                    return ()
                           True -> do
                             send caller (self st)
             True -> do self <- getSelfNode
-                       say $ "Circle: " ++ (show recv)
+                       --say $ "Circle: " ++ (show recv)
                        send caller self -- We've detected a circle, we cant say NodeA's sucessor is NodeA
                        return ()
 
 getPred = do st <- getState
              return (predecessor st)
 
+-- | notifier is telling you he thinks he is your predecessor, check if it's true.
 notify notifier = do
   st <- getState
   if between (cNodeId notifier) (cNodeId . predecessor $ st) (cNodeId . self $ st)
@@ -208,12 +214,13 @@ notify notifier = do
 $( remotable ['relayFndSucc, 'getPred, 'notify] )
 
 
+-- | Joins a chord ring. Takes the id of a known node to bootstrap from.
 joinChord :: NodeId -> ProcessM ()
 joinChord node = do
     st <- getState
     succ <- remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
-    say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node)) -- checked, no problem any longer
-    buildFingers succ
+    say $ "Ret self?: " ++ (show (fst succ == (self st))) ++ " Ret boot?: " ++ (show (fst succ == node))
+    buildFingers (fst succ)
     sst <- getState
     say $ "Finish join: " ++ (show . nils . fingerTable $ sst)
     let suc = successor sst
@@ -224,6 +231,7 @@ joinChord node = do
 nils :: Map.Map Integer NodeId -> [NodeId]
 nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
 
+-- | This is run periodically to check if our fingertable is correct
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
   st <- getState
@@ -238,25 +246,27 @@ stabilize = do
                         else spawn succ (notify__closure (self st)) >> stabilize
     Nothing -> stabilize
 
+-- | This is a debug function, it periodically requests to know the sucessor of a random key in the ring
 randomFinds = do
   liftIO $ threadDelay 8000000 -- 4 sec
   st <- getState
   key <- liftIO $ randomRIO (1, 2^(m st)) :: ProcessM Integer
-  succ <- findSuccessor key
+  (succ, k) <- findSuccessor key
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
-  say $ (show . fm . cNodeId . self $ st) ++ " says succ " ++ (show . fm $ key) ++ " is " ++ (show . fm . cNodeId $ succ) ++ ", " ++ (show succ)
+      sh = (take 5) . show
+  say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ) ++ " " ++ (show $ key == k)
   randomFinds
 
 
 -- | YOU are wordering who's the successor of a certain key, if you don't know yourself
 -- | you relay it forward with YOU as the original caller.
-findSuccessor :: Integer -> ProcessM NodeId
+findSuccessor :: Integer -> ProcessM (NodeId, Integer)
 findSuccessor key = do
   st <- getState
   case (hasSuccessor st key) of
-      (Just suc) -> return suc
+      (Just suc) -> return (suc, key)
       _ -> do
           selfPid <- getSelfPid -- ^ get your pid
           recv <- closestPreceding st key -- | find the next to relay to
@@ -265,17 +275,17 @@ findSuccessor key = do
                         return ret
             True -> say "Find succ should not be here" >> liftIO (threadDelay 5000000) >> findSuccessor key
 
-remoteFindSuccessor :: NodeId -> Integer -> ProcessM NodeId
+remoteFindSuccessor :: NodeId -> Integer -> ProcessM (NodeId, Integer)
 remoteFindSuccessor node key = do
   st <- getState
   selfPid <- getSelfPid
   spawn node (relayFndSucc__closure (self st, selfPid, (key :: Integer)))
-  succ <- receiveTimeout 5000 [match (\x -> return x)] :: ProcessM (Maybe NodeId) -- ^ TODO should time out and retry
+  succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe (NodeId, Integer)) -- ^ TODO should time out and retry
   case succ of
     Nothing -> say "Timed out, retrying" >> remoteFindSuccessor node (key :: Integer)
     Just c -> do
                 st' <- getState
-                let uSt = addFinger c st'
+                let uSt = addFinger (fst c) st'
                 putState uSt
                 return c
 
@@ -298,13 +308,11 @@ bootStrap st _ = do
   let peers' = findPeerByRole peers "NODE"
   case length peers' > 1 of
     True -> do
-             --let nSt = addFinger (head . (drop 1) $ peers') st'
              spawnLocal (joinChord (head . (drop 1) $ peers'))
              spawnLocal stabilize
              spawnLocal randomFinds
              handleState st'
-    False -> do let a = 1 --say (show (addFinger (self st') st'))
-                spawnLocal stabilize
+    False -> do spawnLocal stabilize
                 spawnLocal randomFinds
                 handleState (addFinger (self st') st')
 
@@ -324,5 +332,4 @@ initState = NodeState {
         , predecessor = undefined
         , timeout = 10 -- ^ The timout latency of ping
         , m = 160 -- ^ The number of bits in a key, ususaly 160
-        , alpha = 4 -- ^ The number of parralell queries
         }
