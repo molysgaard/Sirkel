@@ -182,11 +182,11 @@ instance Binary PassState where
 
 getState :: ProcessM NodeState
 getState = do statePid <- getStatePid
-              pid <- getStatePid
+              pid <- getSelfPid
               send statePid (ReadState pid)
-              ret <- receiveTimeout 1000000 [ match (\(RetReadState st) -> return st) ]
+              ret <- receiveTimeout 10000000 [ match (\(RetReadState st) -> return st) ]
               case ret of
-                Nothing -> getState
+                Nothing -> say "asked for state but state process did not return within timeout, retrying" >> getState
                 Just st -> return st
 
 modifyState :: (NodeState -> NodeState) -> ProcessM ()
@@ -194,16 +194,16 @@ modifyState f = do
                  statePid <- getStatePid
                  selfPid <- getSelfPid
                  send statePid (TakeState selfPid)
-                 ret <- receiveTimeout 1000000 [ match (\(RetTakeState st) -> return st) ]
+                 ret <- receiveTimeout 10000000 [ match (\(RetTakeState st) -> return st) ]
                  case ret of
-                   Nothing -> return ()
+                   Nothing -> say "asked for modify, timeout, ignoring and continuing" >> return ()
                    Just st -> send statePid (PutState (f st))
 
 getStatePid :: ProcessM ProcessId
 getStatePid = do nid <- getSelfNode
                  statePid <- nameQuery nid "CHORD-NODE-STATE"
                  case statePid of
-                   Nothing -> error "State not initialized."
+                   Nothing -> say "State not initialized, state-process is not running" >> getStatePid
                    Just pid -> return pid
 -- }}}
 
@@ -221,21 +221,22 @@ relayFndSucc nid caller key = do
   case (hasSuccessor st key) of
       (Just suc) -> do 
              --say ((sh . fm . cNodeId . self $ st) ++ " hasSucc: " ++ (sh . fm $ key) ++ " = " ++ (sh . fm . cNodeId $ suc))
-             send caller (suc, key) -- If we only are two in the ring, we will send ourselves
-      _ -> do
-          recv <- closestPreceding st key -- | find the next to relay to
-          case recv == (nodeFromPid caller) of
-            False -> do case recv == (self st) of
-                          False -> do
-                            let clos = $( mkClosureRec 'relayFndSucc )
-                            spawn recv (clos (self st) caller key)
-	                    return ()
-                          True -> do
-                            send caller (self st)
-            True -> do self <- getSelfNode
-                       --say $ "Circle: " ++ (show recv)
-                       send caller self -- We've detected a circle, we cant say NodeA's sucessor is NodeA
-                       return ()
+             send caller (suc, key)
+      _ -> case (Map.null (fingerTable st)) of
+            True -> send caller (self st, key)
+            _    -> recv <- closestPreceding st key -- | find the next to relay to
+                    case recv == (nodeFromPid caller) of
+                      False -> do case recv == (self st) of
+                                    False -> do
+                                      let clos = $( mkClosureRec 'relayFndSucc )
+                                      spawn recv (clos (self st) caller key)
+	                              return ()
+                                    True -> do
+                                      send caller (self st)
+                      True -> do self <- getSelfNode
+                                 say $ "Circle: " ++ (show recv)
+                                 send caller self -- We've detected a circle, we can't spawn a relayFndSucc for NodeA's sucessor on NodeA
+                                 return ()
 
 getPred = do st <- getState
              return (predecessor st)
@@ -254,6 +255,7 @@ $( remotable ['relayFndSucc, 'getPred, 'notify] )
 joinChord :: NodeId -> ProcessM ()
 joinChord node = do
     st <- getState
+    say $ "Join on: " ++ (show node)
     succ <- remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
     say $ "Ret self?: " ++ (show (fst succ == (self st))) ++ " Ret boot?: " ++ (show (fst succ == node))
     buildFingers (fst succ)
@@ -262,7 +264,7 @@ joinChord node = do
     let suc = successor sst
     case suc of
       (Just c) -> spawn c (notify__closure (self st)) >> return ()
-      Nothing -> return ()
+      Nothing -> say "joining got us no successor!" >> return ()
 
 -- this is a debug function with a bogus name
 nils :: Map.Map Integer NodeId -> [NodeId]
@@ -285,7 +287,7 @@ stabilize = do
 
 -- | This is a debug function, it periodically requests to know the sucessor of a random key in the ring
 randomFinds = do
-  liftIO $ threadDelay 8000000 -- 4 sec
+  liftIO $ threadDelay 8000000 -- 8 sec
   st <- getState
   key <- liftIO $ randomRIO (1, 2^(m st)) :: ProcessM Integer
   (succ, k) <- findSuccessor key
@@ -310,14 +312,14 @@ findSuccessor key = do
           case recv == (self st) of
             False -> do ret <- remoteFindSuccessor recv key
                         return ret
-            True -> say "Find succ should not be here" >> liftIO (threadDelay 5000000) >> findSuccessor key
+            True -> say "no use in asking ourselves, waiting and retrying to se if more nodes appear" >> liftIO (threadDelay 5000000) >> findSuccessor key
 
 remoteFindSuccessor :: NodeId -> Integer -> ProcessM (NodeId, Integer)
 remoteFindSuccessor node key = do
   st <- getState
   selfPid <- getSelfPid
   spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer))
-  succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe (NodeId, Integer)) -- ^ TODO should time out and retry
+  succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe (NodeId, Integer))
   case succ of
     Nothing -> say "Timed out, retrying" >> remoteFindSuccessor node (key :: Integer)
     Just c -> do
@@ -327,9 +329,10 @@ remoteFindSuccessor node key = do
 -- {{{ buildFingers
 buildFingers :: NodeId -> ProcessM ()
 buildFingers buildNode = do
+                      say $ "buildNode is: " ++ (show buildNode)
                       st <- getState
                       nodeId <- getSelfNode
-                      let f = remoteFindSuccessor buildNode
+                      let f i = say (show i) >> remoteFindSuccessor buildNode i
                           nodids = map (fingerVal st) r
                           r = [1 .. (m $ st)]
                       fingers <- sequence $ map f nodids
@@ -340,43 +343,47 @@ bootStrap st _ = do
   selfN <- getSelfNode
   let st' = st { self = selfN, predecessor = selfN }
   peers <- getPeers
-  let peers' = findPeerByRole peers "NODE"
-  case length peers' > 1 of
+  let peers' = filter (/= selfN) $ findPeerByRole peers "NODE" -- remove ourselves from peerlist
+  case length peers' >= 1 of
     True -> do
-             spawnLocal (joinChord (head . (drop 1) $ peers'))
+             spawnLocal $ handleState st'
+             spawnLocal (joinChord (head peers'))
              spawnLocal stabilize
              --spawnLocal randomFinds
-             spawnLocal userInput
-             handleState st'
-    False -> do spawnLocal stabilize
+             userInput
+             
+    False -> do spawnLocal $ handleState (addFinger (self st') st')
+                spawnLocal stabilize
                 --spawnLocal randomFinds
-                spawnLocal userInput
-                handleState (addFinger (self st') st')
+                userInput
 
 -- | handlet get and puts for the state
+-- this function is butt ugly and needs some hefty sugar
 handleState st' = do
   nameSet "CHORD-NODE-STATE"
-  mSt <- liftIO $ newMVar st'
-  loop mSt
+  loop st'
 
-  where loop :: MVar NodeState -> ProcessM ()
-        loop mSt = do
+  where loop :: NodeState -> ProcessM ()
+        loop st = do
             receiveWait
-              [ match (\(ReadState pid) -> getSt mSt pid)
-              , match (\(TakeState pid) -> modSt mSt pid) ]
+              [ matchIf (\x -> case x of
+                                 (ReadState _) -> True
+                                 _ -> False) (\(ReadState pid) -> getSt st pid)
+              , matchIf (\x -> case x of
+                               (TakeState _) -> True
+                               _ -> False) (\(TakeState pid) -> modSt st pid) ]
             >>= loop
-        getSt mSt pid = do
-          st <- liftIO $ readMVar mSt
+        getSt st pid = do
           send pid (RetReadState st)
-          return mSt
-        modSt mSt pid = do
-          st <- liftIO $ takeMVar mSt
-          send pid (RetReadState st)
-          ret <- receiveTimeout 1000000 [ match (\(PutState st) -> return st) ]
+          return st
+        modSt st pid = do
+          send pid (RetTakeState st)
+          ret <- receiveTimeout 1000000 [ matchIf (\x -> case x of
+                                                           (PutState _) -> True
+                                                           _ -> False)  (\(PutState st) -> return st) ]
           case ret of
-            Nothing -> liftIO (putMVar mSt st) >> return mSt
-            Just newSt -> do liftIO $ putMVar mSt newSt
-                             return mSt
+            Nothing -> say "process asked for modify, but did not return new state" >> return st
+            Just newSt -> return newSt
 
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
