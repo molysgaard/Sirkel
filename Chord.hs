@@ -143,52 +143,66 @@ fingerVal st k = mod ((cNodeId . self $ st) + 2^(k-1)) (2^(m st))
 -- }}}
 
 -- {{{ State stuff
-data PassState = GetState ProcessId | AskModifyState ProcessId | PushModifiedState NodeState | RetState NodeState deriving (Show, Typeable)
+data PassState = ReadState ProcessId
+               | RetReadState NodeState
+               | TakeState ProcessId
+               | RetTakeState NodeState
+               | PutState NodeState deriving (Show, Typeable)
 
 instance Binary PassState where
-  put (GetState pid) = do put (0 :: Word8)
-                          put pid
-  put (AskModifyState pid) = do put (1 :: Word8)
-                                put pid
-  put (RetState i) = do put (2 :: Word8)
+  put (ReadState pid) = do put (0 :: Word8)
+                           put pid
+  put (RetReadState i) = do put (1 :: Word8)
+                            put i
+
+  put (TakeState pid) = do put (2 :: Word8)
+                           put pid
+  put (RetTakeState i) = do put (3 :: Word8)
+                            put i
+  put (PutState i) = do put (4 :: Word8)
                         put i
-  put (PushModifiedState i) = do put (3 :: Word8)
-                                 put i
   get = do
         flag <- getWord8
         case flag of
           0 -> do
                pid <- get
-               return (GetState pid)
+               return (ReadState pid)
           1 -> do
-               pid <- get
-               return (AskModifyState pid)
-          2 -> do
                i <- get
-               return (RetState i)
+               return (RetReadState i)
+          2 -> do
+               pid <- get
+               return (TakeState pid)
           3 -> do
                i <- get
-               return (PushModifiedState i)
+               return (RetTakeState i)
+          4 -> do
+               i <- get
+               return (PutState i)
 
 getState :: ProcessM NodeState
-getState = do nodeId <- getSelfNode
-              let process = ProcessId nodeId 7 -- THIS SEEMS TO BE THE MAGICAL NUMBER, it means that right now, CloudHaskell spawns 6 processes to handle all the internal stuff, that means the first process i spawn myself is number seven. This one holds the state.
-              pid <- getSelfPid
-              send process (GetState pid)
-              (RetState a) <- expect
-              return a
+getState = do statePid <- getStatePid
+              pid <- getStatePid
+              send statePid (ReadState pid)
+              ret <- receiveTimeout 1000000 [ match (\(RetReadState st) -> return st) ]
+              case ret of
+                Nothing -> getState
+                Just st -> return st
 
 modifyState :: (NodeState -> NodeState) -> ProcessM ()
 modifyState f = do
                  statePid <- getStatePid
                  selfPid <- getSelfPid
-                 send statePid (AskModifyState)
-                 st <- receiveTimeout 1000000 [ match (\(RetState st) -> return st) ]
-                 send statePid (PushModifiedState st)
+                 send statePid (TakeState selfPid)
+                 ret <- receiveTimeout 1000000 [ match (\(RetTakeState st) -> return st) ]
+                 case ret of
+                   Nothing -> return ()
+                   Just st -> send statePid (PutState (f st))
 
 getStatePid :: ProcessM ProcessId
 getStatePid = do nid <- getSelfNode
-                 case nameQuery nid "CHORD-NODE-STATE" of
+                 statePid <- nameQuery nid "CHORD-NODE-STATE"
+                 case statePid of
                    Nothing -> error "State not initialized."
                    Just pid -> return pid
 -- }}}
@@ -340,27 +354,29 @@ bootStrap st _ = do
                 handleState (addFinger (self st') st')
 
 -- | handlet get and puts for the state
-handleState st = do
+handleState st' = do
   nameSet "CHORD-NODE-STATE"
-  mSt <- liftIO $ newMVar st
+  mSt <- liftIO $ newMVar st'
   loop mSt
 
   where loop :: MVar NodeState -> ProcessM ()
         loop mSt = do
             receiveWait
-              [ match (\(GetState pid) -> retSt mSt pid)
-              , match (\(AskModifyState pid) -> modSt mSt pid) ]
+              [ match (\(ReadState pid) -> getSt mSt pid)
+              , match (\(TakeState pid) -> modSt mSt pid) ]
             >>= loop
-        retSt mSt pid = do
+        getSt mSt pid = do
           st <- liftIO $ readMVar mSt
-          send pid (RetState st)
+          send pid (RetReadState st)
           return mSt
         modSt mSt pid = do
           st <- liftIO $ takeMVar mSt
-          send pid (RetState st)
-          newSt <- receiveTimeout 1000000 [ match (\(PushModifiedState) st -> return st) ]
-          putMVar mSt newSt
-          return mSt
+          send pid (RetReadState st)
+          ret <- receiveTimeout 1000000 [ match (\(PutState st) -> return st) ]
+          case ret of
+            Nothing -> liftIO (putMVar mSt st) >> return mSt
+            Just newSt -> do liftIO $ putMVar mSt newSt
+                             return mSt
 
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
