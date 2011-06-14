@@ -82,6 +82,8 @@ successor st = helper st 1 --Map.lookup 1 (fingerTable st)
 cNodeId n = integerDigest . sha1 $ encode n
 --}}}
 
+-- {{{ algorithmic stuff
+-- {{{ hasSuccessor
 -- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
 hasSuccessor :: NodeState -> Integer -> Maybe NodeId
 hasSuccessor st key
@@ -94,6 +96,7 @@ hasSuccessor st key
      (Just succ) -> if between key n ((cNodeId succ) + 1)
                     then Just succ
                     else Nothing
+-- }}}
 
 -- {{{ closestPrecedingNode
 closestPreceding st key = do
@@ -115,12 +118,14 @@ lookopAndIf f m k
   | otherwise = Nothing
 -- }}}
 
+-- {{{ between
 -- | is n in the domain of (a, b) ?
 between :: Integer -> Integer -> Integer -> Bool
 between n a b
   | a == b = n /= a --error "n can't be between a and b when a == b" -- can't be alike
   | (a < b) = (a < n) && (n < b)
   | (b < a) = not $ between n (b-1) (a+1)
+-- }}}
 
 -- {{{ addFinger
 -- | Adds a finger to the fingertable. If there already exists a finger they are compared to see who's the best fit.
@@ -140,6 +145,7 @@ addFinger newFinger st = st {fingerTable = foldl' pred (fingerTable st) [1..(m s
 
 fingerVal ::  (Integral a) => NodeState -> a -> Integer
 fingerVal st k = mod ((cNodeId . self $ st) + 2^(k-1)) (2^(m st))
+-- }}}
 -- }}}
 
 -- {{{ State stuff
@@ -207,6 +213,7 @@ getStatePid = do nid <- getSelfNode
                    Just pid -> return pid
 -- }}}
 
+
 -- | someone asks you for a successor, if you know it you reply to the original caller,
 -- | else you relay the query forward
 relayFndSucc :: NodeId -> ProcessId -> Integer -> ProcessM ()
@@ -220,23 +227,17 @@ relayFndSucc nid caller key = do
       sh = (take 5) . show
   case (hasSuccessor st key) of
       (Just suc) -> do 
-             --say ((sh . fm . cNodeId . self $ st) ++ " hasSucc: " ++ (sh . fm $ key) ++ " = " ++ (sh . fm . cNodeId $ suc))
-             send caller (suc, key)
-      _ -> case (Map.null (fingerTable st)) of
-            True -> send caller (self st, key)
-            _    -> recv <- closestPreceding st key -- | find the next to relay to
-                    case recv == (nodeFromPid caller) of
-                      False -> do case recv == (self st) of
-                                    False -> do
-                                      let clos = $( mkClosureRec 'relayFndSucc )
-                                      spawn recv (clos (self st) caller key)
-	                              return ()
-                                    True -> do
-                                      send caller (self st)
-                      True -> do self <- getSelfNode
-                                 say $ "Circle: " ++ (show recv)
-                                 send caller self -- We've detected a circle, we can't spawn a relayFndSucc for NodeA's sucessor on NodeA
-                                 return ()
+             send caller (suc, key) -- we have the successor of the node
+      Nothing -> do
+          recv <- closestPreceding st key -- | find the next to relay to
+          case recv == (self st) of
+            False -> do
+              let clos = $( mkClosureRec 'relayFndSucc )
+              spawn recv (clos (self st) caller key)
+	      return ()
+            True -> do
+              say "THIS IS WRONG!" -- this should never happen because we should not be in the fingertable
+              send caller (self st)
 
 getPred = do st <- getState
              return (predecessor st)
@@ -254,6 +255,7 @@ $( remotable ['relayFndSucc, 'getPred, 'notify] )
 -- | Joins a chord ring. Takes the id of a known node to bootstrap from.
 joinChord :: NodeId -> ProcessM ()
 joinChord node = do
+    modifyState (addFinger node)
     st <- getState
     say $ "Join on: " ++ (show node)
     succ <- remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
@@ -274,7 +276,6 @@ nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO th
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
   st <- getState
-  --say $ "Start stab: " ++ (show . nils . fingerTable $ st)
   case successor st of
     (Just succ) -> do succPred <- callRemote succ getPred__closure
                       if between (cNodeId succPred) (cNodeId . self $ st) (cNodeId succ)
@@ -294,8 +295,8 @@ randomFinds = do
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
-      --sh = (take 5) . show
-  --say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ) ++ " " ++ (show $ key == k)
+      sh = (take 5) . show
+  say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ) ++ " " ++ (show $ key == k)
   randomFinds
 
 
@@ -312,7 +313,7 @@ findSuccessor key = do
           case recv == (self st) of
             False -> do ret <- remoteFindSuccessor recv key
                         return ret
-            True -> say "no use in asking ourselves, waiting and retrying to se if more nodes appear" >> liftIO (threadDelay 5000000) >> findSuccessor key
+            True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessor key
 
 remoteFindSuccessor :: NodeId -> Integer -> ProcessM (NodeId, Integer)
 remoteFindSuccessor node key = do
@@ -332,7 +333,7 @@ buildFingers buildNode = do
                       say $ "buildNode is: " ++ (show buildNode)
                       st <- getState
                       nodeId <- getSelfNode
-                      let f i = say (show i) >> remoteFindSuccessor buildNode i
+                      let f i = remoteFindSuccessor buildNode i
                           nodids = map (fingerVal st) r
                           r = [1 .. (m $ st)]
                       fingers <- sequence $ map f nodids
@@ -349,12 +350,12 @@ bootStrap st _ = do
              spawnLocal $ handleState st'
              spawnLocal (joinChord (head peers'))
              spawnLocal stabilize
-             --spawnLocal randomFinds
+             spawnLocal randomFinds
              userInput
              
     False -> do spawnLocal $ handleState (addFinger (self st') st')
                 spawnLocal stabilize
-                --spawnLocal randomFinds
+                spawnLocal randomFinds
                 userInput
 
 -- | handlet get and puts for the state
@@ -385,6 +386,7 @@ handleState st' = do
             Nothing -> say "process asked for modify, but did not return new state" >> return st
             Just newSt -> return newSt
 
+-- | debug function, reads a 0.[0-9] number from command line and runs findSuccessor on it in the DHT
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
                let num' = read line :: Double
