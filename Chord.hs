@@ -20,17 +20,23 @@ import Remote.Peer
 import Remote.Process
 import Remote.Init
 import Remote.Encoding
+import Remote.Reg
+import Remote
 
 import Control.Monad (liftM)
 import Data.Typeable
 import Control.Monad.IO.Class (liftIO)
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
+
 import qualified Data.Map as Map
 import Data.List (foldl')
 
 import Data.Digest.Pure.SHA
 import Data.Binary
+
+import IO
 
 -- for helper debug
 import qualified Data.List as List
@@ -137,15 +143,17 @@ fingerVal st k = mod ((cNodeId . self $ st) + 2^(k-1)) (2^(m st))
 -- }}}
 
 -- {{{ State stuff
-data PassState = GetState ProcessId | PutState NodeState | RetState NodeState deriving (Show, Typeable)
+data PassState = GetState ProcessId | AskModifyState ProcessId | PushModifiedState NodeState | RetState NodeState deriving (Show, Typeable)
 
 instance Binary PassState where
   put (GetState pid) = do put (0 :: Word8)
                           put pid
-  put (PutState i) = do put (1 :: Word8)
-                        put i
+  put (AskModifyState pid) = do put (1 :: Word8)
+                                put pid
   put (RetState i) = do put (2 :: Word8)
                         put i
+  put (PushModifiedState i) = do put (3 :: Word8)
+                                 put i
   get = do
         flag <- getWord8
         case flag of
@@ -153,11 +161,14 @@ instance Binary PassState where
                pid <- get
                return (GetState pid)
           1 -> do
-               i <- get
-               return (PutState i)
+               pid <- get
+               return (AskModifyState pid)
           2 -> do
                i <- get
                return (RetState i)
+          3 -> do
+               i <- get
+               return (PushModifiedState i)
 
 getState :: ProcessM NodeState
 getState = do nodeId <- getSelfNode
@@ -167,24 +178,32 @@ getState = do nodeId <- getSelfNode
               (RetState a) <- expect
               return a
 
-putState :: NodeState -> ProcessM ()
-putState st = do nodeId <- getSelfNode
-                 let process = ProcessId nodeId 7
-                 send process (PutState st)
+modifyState :: (NodeState -> NodeState) -> ProcessM ()
+modifyState f = do
+                 statePid <- getStatePid
+                 selfPid <- getSelfPid
+                 send statePid (AskModifyState)
+                 st <- receiveTimeout 1000000 [ match (\(RetState st) -> return st) ]
+                 send statePid (PushModifiedState st)
+
+getStatePid :: ProcessM ProcessId
+getStatePid = do nid <- getSelfNode
+                 case nameQuery nid "CHORD-NODE-STATE" of
+                   Nothing -> error "State not initialized."
+                   Just pid -> return pid
 -- }}}
 
 -- | someone asks you for a successor, if you know it you reply to the original caller,
 -- | else you relay the query forward
 relayFndSucc :: NodeId -> ProcessId -> Integer -> ProcessM ()
 relayFndSucc nid caller key = do
-  st' <- getState
-  let st = addFinger (nodeFromPid caller) (addFinger nid st')
-      x = 2^(m st) :: Integer
+  modifyState (\x -> addFinger (nodeFromPid caller) (addFinger nid x))
+  st <- getState
+  let x = 2^(m st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
       sh :: Integer -> String
       sh = (take 5) . show
-  putState st
   case (hasSuccessor st key) of
       (Just suc) -> do 
              --say ((sh . fm . cNodeId . self $ st) ++ " hasSucc: " ++ (sh . fm $ key) ++ " = " ++ (sh . fm . cNodeId $ suc))
@@ -211,7 +230,7 @@ getPred = do st <- getState
 notify notifier = do
   st <- getState
   if between (cNodeId notifier) (cNodeId . predecessor $ st) (cNodeId . self $ st)
-    then putState $ st {predecessor = notifier}
+    then modifyState (\x -> x {predecessor = notifier})
     else return ()
 
 $( remotable ['relayFndSucc, 'getPred, 'notify] )
@@ -231,6 +250,7 @@ joinChord node = do
       (Just c) -> spawn c (notify__closure (self st)) >> return ()
       Nothing -> return ()
 
+-- this is a debug function with a bogus name
 nils :: Map.Map Integer NodeId -> [NodeId]
 nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
 
@@ -242,8 +262,8 @@ stabilize = do
   case successor st of
     (Just succ) -> do succPred <- callRemote succ getPred__closure
                       if between (cNodeId succPred) (cNodeId . self $ st) (cNodeId succ)
-                        then do st' <- getState
-                                putState (addFinger succPred st')
+                        then do modifyState (addFinger succPred)
+                                st' <- getState
                                 spawn succ (notify__closure (self st'))
                                 say ("New succ: " ++ (show succPred)) >> stabilize
                         else spawn succ (notify__closure (self st)) >> stabilize
@@ -258,8 +278,8 @@ randomFinds = do
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
-      sh = (take 5) . show
-  say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ) ++ " " ++ (show $ key == k)
+      --sh = (take 5) . show
+  --say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ) ++ " " ++ (show $ key == k)
   randomFinds
 
 
@@ -287,9 +307,7 @@ remoteFindSuccessor node key = do
   case succ of
     Nothing -> say "Timed out, retrying" >> remoteFindSuccessor node (key :: Integer)
     Just c -> do
-                st' <- getState
-                let uSt = addFinger (fst c) st'
-                putState uSt
+                modifyState (addFinger (fst c))
                 return c
 
 -- {{{ buildFingers
@@ -313,19 +331,48 @@ bootStrap st _ = do
     True -> do
              spawnLocal (joinChord (head . (drop 1) $ peers'))
              spawnLocal stabilize
-             spawnLocal randomFinds
+             --spawnLocal randomFinds
+             spawnLocal userInput
              handleState st'
     False -> do spawnLocal stabilize
-                spawnLocal randomFinds
+                --spawnLocal randomFinds
+                spawnLocal userInput
                 handleState (addFinger (self st') st')
 
 -- | handlet get and puts for the state
 handleState st = do
-  pid <- getSelfPid
-  updSt <- receiveWait (map match [hsGet])
-  handleState updSt
-  where hsGet (GetState pid) = send pid (RetState st) >> return st
-        hsGet (PutState nSt) = return nSt
+  nameSet "CHORD-NODE-STATE"
+  mSt <- liftIO $ newMVar st
+  loop mSt
+
+  where loop :: MVar NodeState -> ProcessM ()
+        loop mSt = do
+            receiveWait
+              [ match (\(GetState pid) -> retSt mSt pid)
+              , match (\(AskModifyState pid) -> modSt mSt pid) ]
+            >>= loop
+        retSt mSt pid = do
+          st <- liftIO $ readMVar mSt
+          send pid (RetState st)
+          return mSt
+        modSt mSt pid = do
+          st <- liftIO $ takeMVar mSt
+          send pid (RetState st)
+          newSt <- receiveTimeout 1000000 [ match (\(PushModifiedState) st -> return st) ]
+          putMVar mSt newSt
+          return mSt
+
+userInput :: ProcessM ()
+userInput = do line <- liftIO $ hGetLine stdin
+               let num' = read line :: Double
+                   num  = truncate (num' * (fromInteger x)) :: Integer
+                   x = 2^160 :: Integer
+                   fm :: Integer -> Double
+                   fm = fromRational . (% x)
+                   sh = (take 5) . show
+               (succ,_) <- findSuccessor num
+               say $ "You asked for: " ++ (sh num') ++ " and i got: " ++ (sh . fm . cNodeId $ succ)
+               userInput
 
 main = remoteInit Nothing [Main.__remoteCallMetaData] (bootStrap initState)
 
