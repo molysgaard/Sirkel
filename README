@@ -1,0 +1,22 @@
+Chord is a DHT
+
+to use compile Chord.hs with ghc -threaded --make Chord.hs
+
+afterwards run as many Chord instances you want on the network you have.
+It only supports LAN or boxes directly connected to the internet yet.
+
+to put data into the DHT write "put " precedded by the data and press enter.
+
+example:
+put abc123
+
+The data will the be saved in the DHT.
+All nodes can now "get" the data using the SHA-1 hash of the data.
+
+following the example ower:
+the SHA-1 hash of abc123 in decimal is: 73082682478848395176339340946812037781470107948
+
+therefore the command:
+get 73082682478848395176339340946812037781470107948
+
+will get the value from the responsible node and print it, in this example "abc123".

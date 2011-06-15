@@ -14,6 +14,7 @@ module Main where
 -- Most important now i gettin locking on the state. That means putting the state in a MVar and make transactions
 -- when processes wants to modify it. Reads just return the current state, modify locks it, makes the modification and then opens again
 
+-- {{{ imports
 import Remote.Call
 import Remote.Channel
 import Remote.Peer
@@ -35,8 +36,10 @@ import Data.List (foldl')
 
 import Data.Digest.Pure.SHA
 import Data.Binary
+import qualified Data.ByteString.Char8 as BS
 
 import IO
+-- }}}
 
 -- for helper debug
 import qualified Data.List as List
@@ -48,6 +51,7 @@ import Data.Ratio
 data NodeState = NodeState {
           self :: NodeId
         , fingerTable :: Map.Map Integer NodeId -- ^ The fingerTable
+        , blockDir :: FilePath -- ^ The dir to store the blocks
         , predecessor :: NodeId
         , timeout :: Int -- ^ The timout latency of ping
         , m :: Integer -- ^ The number of bits in a key, ususaly 160
@@ -62,15 +66,17 @@ instance Eq NodeState where
 instance Binary NodeState where
   put a = do put (self a)
              put (fingerTable a)
+             put (blockDir a)
 	     put (predecessor a)
 	     put (timeout a)
 	     put (m a)
   get = do se <- get
            ft <- get
+           bd <- get
 	   pr <- get
 	   ti <- get
 	   m <- get
-	   return (NodeState { self = se, fingerTable = ft, predecessor = pr, timeout = ti, m=m })
+	   return (NodeState { self = se, fingerTable = ft, blockDir = bd, predecessor = pr, timeout = ti, m=m })
 
 successor :: NodeState -> Maybe NodeId
 successor st = helper st 1 --Map.lookup 1 (fingerTable st)
@@ -216,6 +222,7 @@ getStatePid = do nid <- getSelfNode
 -- }}}
 
 
+-- {{{ relayFndSucc
 -- | someone asks you for a successor, if you know it you reply to the original caller,
 -- | else you relay the query forward
 relayFndSucc :: NodeId -> ProcessId -> Integer -> ProcessM ()
@@ -245,17 +252,49 @@ relayFndSucc nid caller key = do
 
 getPred = do st <- getState
              return (predecessor st)
+-- }}}
 
+-- {{{ notify
 -- | notifier is telling you he thinks he is your predecessor, check if it's true.
 notify notifier = do
   st <- getState
   if between (cNodeId notifier) (cNodeId . predecessor $ st) (cNodeId . self $ st)
     then modifyState (\x -> x {predecessor = notifier})
     else return ()
+-- }}}
 
-$( remotable ['relayFndSucc, 'getPred, 'notify] )
+-- {{{ Block
+data Block = BlockError | BlockFound BS.ByteString deriving (Show, Typeable)
+instance Binary Block where
+  put BlockError = put (0 :: Word8)
+  put (BlockFound bs) = do put (1 :: Word8)
+                           put bs
+  get = do flag <- getWord8
+           case flag of
+             0 -> return BlockError
+             1 -> do bs <- get
+                     return $ BlockFound bs
+-- }}}
+
+-- {{{ remoteGetBlock
+remoteGetBlock :: Integer -> ProcessId -> ProcessM ()
+remoteGetBlock key caller = do
+    st <- getState
+    block <- liftIO $ catch (BS.readFile ((blockDir st) ++ (show key)) >>= (\x -> return $ BlockFound x)) (\e -> return BlockError)
+    send caller block
+-- }}}
+
+-- {{{ remotePutBlock
+remotePutBlock block = do
+    st <- getState
+    let key = cNodeId block
+    liftIO $ BS.writeFile ((blockDir st) ++ (show key)) block
+-- }}}
+
+$( remotable ['relayFndSucc, 'getPred, 'notify, 'remoteGetBlock, 'remotePutBlock] )
 
 
+-- {{{ joinChord
 -- | Joins a chord ring. Takes the id of a known node to bootstrap from.
 joinChord :: NodeId -> ProcessM ()
 joinChord node = do
@@ -271,11 +310,13 @@ joinChord node = do
     case suc of
       (Just c) -> spawn c (notify__closure (self st)) >> return ()
       Nothing -> say "joining got us no successor!" >> return ()
+-- }}}
 
 -- this is a debug function with a bogus name
 nils :: Map.Map Integer NodeId -> [NodeId]
 nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
 
+-- {{{ stabilize
 -- | This is run periodically to check if our fingertable is correct
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
@@ -289,7 +330,9 @@ stabilize = do
                                 say ("New succ: " ++ (show succPred)) >> stabilize
                         else spawn succ (notify__closure (self st)) >> stabilize
     Nothing -> stabilize
+-- }}}
 
+-- {{{ randomFinds
 -- | This is a debug function, it periodically requests to know the sucessor of a random key in the ring
 randomFinds = do
   liftIO $ threadDelay 8000000 -- 8 sec
@@ -299,11 +342,12 @@ randomFinds = do
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
-      sh = (take 5) . show
-  say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ)
+      --sh = (take 5) . show
+  --say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ)
   randomFinds
+-- }}}
 
-
+-- {{{ findSuccessor
 -- | YOU are wordering who's the successor of a certain key, if you don't know yourself
 -- | you relay it forward with YOU as the original caller.
 findSuccessor :: Integer -> ProcessM NodeId
@@ -319,7 +363,31 @@ findSuccessor key = do
             False -> do ret <- remoteFindSuccessor recv key
                         return ret
             True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessor key
+-- }}}
 
+-- {{{ getBlock
+getBlock :: Integer -> ProcessM BS.ByteString
+getBlock key = do
+    succ <- findSuccessor key
+    pid <- getSelfPid
+    spawn succ (remoteGetBlock__closure key pid)
+    block <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe Block)
+    case block of
+      Nothing -> say "GetBlock timed out, retrying" >> getBlock key
+      Just (BlockFound bs) -> say (show bs) >> return bs
+      Just BlockError -> say "Block error" >> liftIO (threadDelay 5000000) >> getBlock key
+-- }}}
+
+-- {{{ putBlock
+putBlock :: BS.ByteString -> ProcessM ()
+putBlock bs = do
+    let key = cNodeId bs
+    succ <- findSuccessor key
+    spawn succ (remotePutBlock__closure bs)
+    return ()
+-- }}}
+
+-- {{{ remoteFindSuccessor
 remoteFindSuccessor :: NodeId -> Integer -> ProcessM NodeId
 remoteFindSuccessor node key = do
   st <- getState
@@ -331,6 +399,7 @@ remoteFindSuccessor node key = do
     Just c -> do
                 modifyState (addFinger c)
                 return c
+-- }}}
 
 -- {{{ buildFingers
 buildFingers :: NodeId -> ProcessM ()
@@ -345,6 +414,7 @@ buildFingers buildNode = do
                       return ()
 -- }}}
 
+-- {{{ bootStrap
 bootStrap st _ = do
   selfN <- getSelfNode
   let st' = st { self = selfN, predecessor = selfN }
@@ -362,7 +432,12 @@ bootStrap st _ = do
                 spawnLocal stabilize
                 spawnLocal randomFinds
                 userInput
+-- }}}
 
+
+    
+
+-- {{{ handleState
 -- | handlet get and puts for the state
 -- this function is butt ugly and needs some hefty sugar
 handleState st' = do
@@ -390,7 +465,9 @@ handleState st' = do
           case ret of
             Nothing -> say "process asked for modify, but did not return new state" >> return st
             Just newSt -> return newSt
+-- }}}
 
+-- {{{ userInput
 -- | debug function, reads a 0.[0-9] number from command line and runs findSuccessor on it in the DHT
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
@@ -399,16 +476,21 @@ userInput = do line <- liftIO $ hGetLine stdin
                    x = 2^160 :: Integer
                    fm :: Integer -> Double
                    fm = fromRational . (% x)
-                   sh = (take 5) . show
-               succ <- findSuccessor num
-               say $ "You asked for: " ++ (sh num') ++ " and i got: " ++ (sh . fm . cNodeId $ succ)
+                   --sh = (take 5) . show
+               case (take 3 line) of
+                  "put" -> do putBlock (BS.pack (drop 4 line))
+                  "get" -> do resp <- getBlock ((read (drop 4 line)) :: Integer)
+                              say $ show resp
                userInput
+-- }}}
 
 main = remoteInit Nothing [Main.__remoteCallMetaData] (bootStrap initState)
+
 
 initState = NodeState {
           self = undefined
         , fingerTable = Map.empty -- ^ The fingerTable
+        , blockDir = "/tmp/"
         , predecessor = undefined
         , timeout = 10 -- ^ The timout latency of ping
         , m = 160 -- ^ The number of bits in a key, ususaly 160
