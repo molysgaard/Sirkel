@@ -30,6 +30,7 @@ import Control.Monad.IO.Class (liftIO)
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
+import qualified Control.Exception as Ex
 
 import qualified Data.Map as Map
 import Data.List (foldl')
@@ -154,6 +155,11 @@ addFinger newFinger st = st {fingerTable = foldl' pred (fingerTable st) [1..(m s
 fingerVal ::  (Integral a) => NodeState -> a -> Integer
 fingerVal st k = mod ((cNodeId . self $ st) + 2^(k-1)) (2^(m st))
 -- }}}
+
+-- {{{ removeFinger
+removeFinger :: NodeId -> NodeState -> NodeState
+removeFinger node st = st { fingerTable = Map.filter (/= node) (fingerTable st) }
+-- }}}
 -- }}}
 
 -- {{{ State stuff
@@ -242,8 +248,10 @@ relayFndSucc nid caller key = do
           case recv == (self st) of
             False -> do
               let clos = $( mkClosureRec 'relayFndSucc )
-              spawn recv (clos (self st) caller key)
-	      return ()
+              flag <- ptry $ spawn recv (clos (self st) caller key) :: ProcessM (Either TransmitException ProcessId)
+              case flag of
+                Left _ -> modifyState (removeFinger recv) >> relayFndSucc nid caller key -- spawning failed
+	        Right _ -> return ()
             True -> do
               say "THIS IS WRONG!" -- this should never happen because we should not be in the fingertable
               send caller (self st)
@@ -291,7 +299,11 @@ remotePutBlock block = do
     liftIO $ BS.writeFile ((blockDir st) ++ (show key)) block
 -- }}}
 
-$( remotable ['relayFndSucc, 'getPred, 'notify, 'remoteGetBlock, 'remotePutBlock] )
+-- {{{ ping
+ping pid = send pid pid
+-- }}}
+
+$( remotable ['relayFndSucc, 'getPred, 'notify, 'remoteGetBlock, 'remotePutBlock, 'ping] )
 
 
 -- {{{ joinChord
@@ -308,7 +320,8 @@ joinChord node = do
     say $ "Finish join: " ++ (show . nils . fingerTable $ sst)
     let suc = successor sst
     case suc of
-      (Just c) -> spawn c (notify__closure (self st)) >> return ()
+      (Just c) -> do ptry (spawn c (notify__closure (self st))) :: ProcessM (Either TransmitException ProcessId)
+                     return ()
       Nothing -> say "joining got us no successor!" >> return ()
 -- }}}
 
@@ -316,19 +329,50 @@ joinChord node = do
 nils :: Map.Map Integer NodeId -> [NodeId]
 nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
 
+-- {{{ checkAlive
+checkAlive :: NodeId -> ProcessM Bool
+checkAlive node = do pid <- getSelfPid
+                     flag <- ptry $ spawn node (ping__closure pid) :: ProcessM (Either TransmitException ProcessId)
+                     case flag of
+                       Left _ -> say "dropped node" >> modifyState (removeFinger node) >> return False
+                       Right _ -> do resp <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe ProcessId)
+                                     case resp of
+                                       Nothing -> do modifyState (removeFinger node)
+                                                     say "dropped node"
+                                                     return False
+                                       Just pid -> return True
+-- }}}
+
+-- {{{ checkFingerTable
+checkFingerTable :: ProcessM ()
+checkFingerTable = do st <- getState
+                      sequence $ List.map checkAlive (nils $ fingerTable st)
+                      return ()
+          
+-- }}}
+
 -- {{{ stabilize
 -- | This is run periodically to check if our fingertable is correct
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
+  checkFingerTable
   st <- getState
   case successor st of
-    (Just succ) -> do succPred <- callRemote succ getPred__closure
-                      if between (cNodeId succPred) (cNodeId . self $ st) (cNodeId succ)
-                        then do modifyState (addFinger succPred)
-                                st' <- getState
-                                spawn succ (notify__closure (self st'))
-                                say ("New succ: " ++ (show succPred)) >> stabilize
-                        else spawn succ (notify__closure (self st)) >> stabilize
+    (Just succ) -> do alive <- checkAlive succ
+                      if alive
+                        then do succPred <- callRemote succ getPred__closure
+                                if between (cNodeId succPred) (cNodeId . self $ st) (cNodeId succ)
+                                  then do modifyState (addFinger succPred)
+                                          st' <- getState
+                                          ptry $ spawn succ (notify__closure (self st')) :: ProcessM (Either TransmitException ProcessId)
+                                          say ("New succ: " ++ (show succPred)) >> stabilize
+                                  else do ptry (spawn succ (notify__closure (self st))) :: ProcessM (Either TransmitException ProcessId)
+                                          stabilize
+                         else do say "Successor is dead, restabilizing"
+                                 st' <- getState
+                                 say (show . length . Map.elems . fingerTable $ st')
+                                 findSuccessor $ mod ((cNodeId . self $ st) + 1) (2^(m st))
+                                 stabilize
     Nothing -> stabilize
 -- }}}
 
@@ -370,11 +414,11 @@ getBlock :: Integer -> ProcessM BS.ByteString
 getBlock key = do
     succ <- findSuccessor key
     pid <- getSelfPid
-    spawn succ (remoteGetBlock__closure key pid)
+    flag <- ptry $ spawn succ (remoteGetBlock__closure key pid)  :: ProcessM (Either TransmitException ProcessId)
     block <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe Block)
     case block of
       Nothing -> say "GetBlock timed out, retrying" >> getBlock key
-      Just (BlockFound bs) -> say (show bs) >> return bs
+      Just (BlockFound bs) -> return bs
       Just BlockError -> say "Block error" >> liftIO (threadDelay 5000000) >> getBlock key
 -- }}}
 
@@ -383,8 +427,10 @@ putBlock :: BS.ByteString -> ProcessM NodeId
 putBlock bs = do
     let key = cNodeId bs
     succ <- findSuccessor key
-    spawn succ (remotePutBlock__closure bs)
-    return succ
+    flag <- ptry $ spawn succ (remotePutBlock__closure bs) :: ProcessM (Either TransmitException ProcessId)
+    case flag of
+      Left _ -> say "put block failed, retrying" >> (liftIO (threadDelay 5000000)) >> putBlock bs
+      Right _ -> return succ
 -- }}}
 
 -- {{{ remoteFindSuccessor
@@ -392,10 +438,10 @@ remoteFindSuccessor :: NodeId -> Integer -> ProcessM NodeId
 remoteFindSuccessor node key = do
   st <- getState
   selfPid <- getSelfPid
-  spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer))
+  ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer)) :: ProcessM (Either TransmitException ProcessId)
   succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe NodeId)
   case succ of
-    Nothing -> say "Timed out, retrying" >> remoteFindSuccessor node (key :: Integer)
+    Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor node (key :: Integer)
     Just c -> do
                 modifyState (addFinger c)
                 return c
@@ -434,9 +480,6 @@ bootStrap st _ = do
                 userInput
 -- }}}
 
-
-    
-
 -- {{{ handleState
 -- | handlet get and puts for the state
 -- this function is butt ugly and needs some hefty sugar
@@ -471,16 +514,19 @@ handleState st' = do
 -- | debug function, reads a 0.[0-9] number from command line and runs findSuccessor on it in the DHT
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
-               let num' = read line :: Double
-                   num  = truncate (num' * (fromInteger x)) :: Integer
-                   x = 2^160 :: Integer
+               let x = 2^160 :: Integer
                    fm :: Integer -> Double
                    fm = fromRational . (% x)
-                   --sh = (take 5) . show
+                   sh = (take 5) . show
                case (take 3 line) of
-                  "put" -> do putBlock (BS.pack (drop 4 line))
+                  "put" -> do holder <- putBlock (BS.pack (drop 4 line))
+                              say $ show holder
                   "get" -> do resp <- getBlock ((read (drop 4 line)) :: Integer)
                               say $ show resp
+                  "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
+                              succ <- findSuccessor num
+                              say $ sh . fm . cNodeId $ succ
+                  _ -> return ()
                userInput
 -- }}}
 
