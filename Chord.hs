@@ -379,12 +379,12 @@ getBlock key = do
 -- }}}
 
 -- {{{ putBlock
-putBlock :: BS.ByteString -> ProcessM ()
+putBlock :: BS.ByteString -> ProcessM NodeId
 putBlock bs = do
     let key = cNodeId bs
     succ <- findSuccessor key
     spawn succ (remotePutBlock__closure bs)
-    return ()
+    return succ
 -- }}}
 
 -- {{{ remoteFindSuccessor
