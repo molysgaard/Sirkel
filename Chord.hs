@@ -4,15 +4,12 @@ module Main where
 -- | TODO
 -- When a node never responds, it should be removed from the fingertable, maybe actively replaced?
 --
--- When a node joins, it very often get it self as it's successor, that's _never_ correct for joins, only lookups to keys
--- Though this bug exists, fingerTables are never corrupted, converging takes i bit more time though
+-- When a node joins, it very often get it self as it's successor, that's _never_ correct for joins, only lookups to keys, think this has been fixed
 --
 -- When a node joins, it makes 160 _sequenced_ lookups, these are to discover what nodes are on the net.
 -- If the lookup times out, it's going to take 160*timeout for it to complete and leave 160 "Timeout" messages
 -- in the logs
 --
--- Most important now i gettin locking on the state. That means putting the state in a MVar and make transactions
--- when processes wants to modify it. Reads just return the current state, modify locks it, makes the modification and then opens again
 
 -- {{{ imports
 import Remote.Call
@@ -395,7 +392,6 @@ joinChord node = do
 --nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
 
 -- {{{ checkAlive
-checkAlive :: NodeId -> ProcessM Bool
 checkAlive node = do pid <- getSelfPid
                      flag <- ptry $ spawn node (ping__closure pid) :: ProcessM (Either TransmitException ProcessId)
                      case flag of
@@ -408,19 +404,36 @@ checkAlive node = do pid <- getSelfPid
                                        Just pid -> return True
 -- }}}
 
-{-- {{{ checkFingerTable
+fingerNodes :: NodeState -> [NodeId]
+fingerNodes st
+  | Just (SuccessorList sl) <- Map.lookup 1 (fingerTable st)
+  , fs <- (drop 1) . Map.elems $ (fingerTable st) :: [FingerEntry]
+  = nub $ sl ++ (map strip fs)
+  where nub = (map head) . List.group
+        strip (FingerNode n) = n
+
+-- {{{ checkFingerTable
 checkFingerTable :: ProcessM ()
 checkFingerTable = do st <- getState
-                      sequence $ List.map checkAlive (nils $ fingerTable st)
+                      sequence $ List.map checkAlive (fingerNodes st)
                       return ()
 -- }}}
---}
+
+-- {{{ checkPred
+checkPred :: ProcessM Bool
+checkPred = do st <- getState
+               flag <- checkAlive (predecessor st)
+               if flag
+                 then return True
+                 else modifyState (\x -> x { predecessor = (self x) }) >> return False
+-- }}}
 
 -- {{{ stabilize
 -- | This is run periodically to check if our fingertable is correct
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
-  --checkFingerTable
+  checkPred 
+  checkFingerTable
   st <- getState
   case successor st of
     (Just succ) -> do alive <- checkAlive succ
