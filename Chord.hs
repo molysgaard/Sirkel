@@ -91,12 +91,13 @@ instance Binary NodeState where
 
 successor :: NodeState -> Maybe NodeId
 successor st
-  | (liftM length (successors st)) == (Just 0) = error "No successors"
+  | (liftM length (successors st)) == (Just 0) = Nothing --error "No successors"
   | otherwise = liftM head $ successors st
 
 successors :: NodeState -> Maybe [NodeId]
 successors st
   | Just (SuccessorList ns) <- Map.lookup 1 (fingerTable st)
+  , length ns /= 0 -- We can't give an empty list back
   = Just ns
   | otherwise = Nothing
 
@@ -111,8 +112,7 @@ data FingerResults = Has [NodeId] | HasNot | Empty
 -- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
 hasSuccessor :: NodeState -> Integer -> FingerResults
 hasSuccessor st key
-  | Map.null (fingerTable st) = Empty
-  | otherwise = do
+  | Just False <- liftM List.null (successors st) = do
    let n = cNodeId (self st)
        maySuccs = successors st
    case maySuccs of
@@ -120,6 +120,7 @@ hasSuccessor st key
      (Just succs) -> if between key n ((cNodeId . head $ succs) + 1)
                     then Has succs
                     else HasNot
+  | otherwise = Empty
 -- }}}
 
 -- {{{ closestPrecedingNode
@@ -149,6 +150,7 @@ closestPreceding' st fingers key i ns
 
   | otherwise = closestPreceding' st fingers key (i-1) ns
     where isBetween (FingerNode x) = between (cNodeId x) (cNodeId . self $ st) key -- isBetween is from the fingertable
+          isBetween (SuccessorList []) = False
           isBetween (SuccessorList x) = between (cNodeId . head $ x) (cNodeId . self $ st) key -- isBetween is from the fingertable
           nub = (map head) . List.group
 
@@ -501,14 +503,14 @@ getBlock key = do
 -- }}}
 
 -- {{{ putBlock
-putBlock :: BS.ByteString -> ProcessM NodeId
+putBlock :: BS.ByteString -> ProcessM (NodeId, Integer)
 putBlock bs = do
     let key = encBlock bs
     succ <- liftM head $ findSuccessor key
     flag <- ptry $ spawn succ (remotePutBlock__closure bs) :: ProcessM (Either TransmitException ProcessId)
     case flag of
       Left _ -> say "put block failed, retrying" >> (liftIO (threadDelay 5000000)) >> putBlock bs
-      Right _ -> return succ
+      Right _ -> return (succ, key)
 -- }}}
 
 -- {{{ remoteFindSuccessor
@@ -606,6 +608,8 @@ userInput = do line <- liftIO $ hGetLine stdin
                               say $ sh . fm . cNodeId . head $ succ
                   "sta" -> do st <- getState
                               say (show st)
+                  "id" -> do st <- getState
+                             say $ sh . fm . cNodeId . self $ st
                   _ -> return ()
                userInput
 -- }}}
