@@ -43,6 +43,7 @@ import IO
 import qualified Data.List as List
 import System.Random (randomRIO)
 import Data.Ratio
+import Maybe (fromJust)
 
 --{{{ Data type and type class definitions
 
@@ -377,7 +378,7 @@ joinChord node = do
     modifyState (addFinger node)
     st <- getState
     say $ "Join on: " ++ (show node)
-    succ <- liftM head $ remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
+    succ <- liftM (head . fromJust) $ remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
     say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node))
     buildFingers succ
     sst <- getState
@@ -485,7 +486,9 @@ findSuccessor key = do
           let recv = last $ closestPreceding st key -- | find the next to relay to
           case recv == (self st) of
             False -> do ret <- remoteFindSuccessor recv key
-                        return ret
+                        case ret of 
+                          Nothing -> modifyState (removeFinger recv) >> findSuccessor key
+                          Just succ -> return succ
             True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessor key
 -- }}}
 
@@ -514,17 +517,19 @@ putBlock bs = do
 -- }}}
 
 -- {{{ remoteFindSuccessor
-remoteFindSuccessor :: NodeId -> Integer -> ProcessM [NodeId]
-remoteFindSuccessor node key = do
+remoteFindSuccessor :: NodeId -> Integer -> ProcessM (Maybe [NodeId])
+remoteFindSuccessor node key = remoteFindSuccessor' node key 2
+remoteFindSuccessor' _ _ 0 = return Nothing
+remoteFindSuccessor' node key tries = do
   st <- getState
   selfPid <- getSelfPid
   ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer)) :: ProcessM (Either TransmitException ProcessId)
   succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe [NodeId])
   case succ of
-    Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor node (key :: Integer)
+    Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor' node (key :: Integer) (tries - 1)
     Just conts -> do
                 modifyState (addFingers conts)
-                return conts
+                return (Just conts)
 -- }}}
 
 -- {{{ buildFingers
