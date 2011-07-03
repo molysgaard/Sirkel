@@ -31,12 +31,16 @@ import System.Random (randomRIO)
 import Data.Ratio
 import Maybe (fromJust)
 
+import qualified Data.HashTable.IO as HT
+
 import Chord
 import DHash
 main = remoteInit Nothing [Chord.__remoteCallMetaData, DHash.__remoteCallMetaData] run
 
 run str = do bootStrap initState str
              spawnLocal randomFinds
+             ht <- liftIO $ HT.new
+             spawnLocal $ initBlockStore ht
              userInput
 
 -- {{{ userInput
@@ -70,7 +74,7 @@ initState = NodeState {
         , predecessor = undefined
         , timeout = 10 -- ^ The timout latency of ping
         , m = 160 -- ^ The number of bits in a key, ususaly 160
-        , r = 16 -- ^ the number of successors and replicas
+        , r = 2 -- ^ the number of successors and replicas
         }
 
 -- {{{ randomFinds
