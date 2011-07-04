@@ -92,15 +92,15 @@ instance Binary NodeState where
 
 successor :: NodeState -> Maybe NodeId
 successor st
-  | (liftM length (successors st)) == (Just 0) = Nothing --error "No successors"
-  | otherwise = liftM head $ successors st
+  | null (successors st) = Nothing --error "No successors"
+  | otherwise = Just . head . successors $ st
 
-successors :: NodeState -> Maybe [NodeId]
+successors :: NodeState -> [NodeId]
 successors st
   | Just (SuccessorList ns) <- Map.lookup 1 (fingerTable st)
   , length ns /= 0 -- We can't give an empty list back
-  = Just ns
-  | otherwise = Nothing
+  = ns
+  | otherwise = []
 
 cNodeId :: NodeId -> Integer
 cNodeId n = integerDigest . sha1 $ encode n
@@ -113,12 +113,12 @@ data FingerResults = Has [NodeId] | HasNot | Empty
 -- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
 hasSuccessor :: NodeState -> Integer -> FingerResults
 hasSuccessor st key
-  | Just False <- liftM List.null (successors st) = do
+  | False <- List.null (successors st) = do
    let n = cNodeId (self st)
        maySuccs = successors st
    case maySuccs of
-     Nothing -> HasNot
-     (Just succs) -> if between key n ((cNodeId . head $ succs) + 1)
+     [] -> HasNot
+     succs -> if between key n ((cNodeId . head $ succs) + 1)
                     then Has succs
                     else HasNot
   | otherwise = Empty
@@ -381,6 +381,7 @@ fingerNodes st
   | Just (SuccessorList sl) <- Map.lookup 1 (fingerTable st)
   , fs <- (drop 1) . Map.elems $ (fingerTable st) :: [FingerEntry]
   = nub $ sl ++ (map strip fs)
+  | otherwise = []
   where nub = (map head) . List.group
         strip (FingerNode n) = n
 -- }}}

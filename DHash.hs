@@ -1,6 +1,9 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
 module DHash where
 
+--TODO the node responsible for a key needs some way of telling other nodes how to replicate it's key.
+--the nodes that take the burden for replicating also needs some way of verifing that they have the responsebility for the block
+
 import Remote.Call
 import Remote.Channel
 import Remote.Peer
@@ -65,19 +68,20 @@ $( remotable ['remoteGetBlock, 'remotePutBlock] )
 
 -- {{{ getBlock
 getBlock :: Integer -> ProcessM (Maybe BS.ByteString)
-getBlock key = getBlock' key 3
+getBlock key = do
+    succ <- findSuccessor key
+    getBlock' key succ
 
-getBlock' :: Integer -> Int -> ProcessM (Maybe BS.ByteString)
-getBlock' _ 0 = return Nothing
-getBlock' key n = do
-    succ <- liftM head $ findSuccessor key
-    blockPid <- getBlockPid succ
+getBlock' :: Integer -> [NodeId] -> ProcessM (Maybe BS.ByteString)
+getBlock' _ [] = return Nothing
+getBlock' key (s:su) = do
+    blockPid <- getBlockPid s
     selfPid <- getSelfPid
     flag <- ptry $ send blockPid (Lookup key selfPid) :: ProcessM (Either TransmitException ())
     block <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe Block)
     case block of
-      Nothing -> say "GetBlock timed out, retrying" >> getBlock' key (n-1)
-      Just BlockError -> say "Block error" >> liftIO (threadDelay 5000000) >> getBlock' key (n-1)
+      Nothing -> say "GetBlock timed out, retrying" >> getBlock' key su
+      Just BlockError -> say "Block error" >> getBlock' key su
       Just (BlockFound bs) -> if encBlock bs == key
                                 then return (Just bs)
                                 else return Nothing
@@ -143,7 +147,7 @@ initBlockStore ht' = do
               [ matchIf (\x -> case x of
                                  (Insert _) -> True
                                  _ -> False)
-                        (\(Insert val) -> jok ht (encBlock val) val)
+                        (\(Insert val) -> jok ht val)
               , matchIf (\x -> case x of
                                (Lookup _ _) -> True
                                _ -> False)
@@ -163,6 +167,10 @@ initBlockStore ht' = do
         tok ht key = do liftIO $ HT.delete ht key
                         return ht
 
-        jok :: DHashTable -> Integer -> BS.ByteString -> ProcessM DHashTable
-        jok ht key val = do liftIO $ HT.insert ht key val
-                            return ht
+        jok :: DHashTable -> BS.ByteString -> ProcessM DHashTable
+        jok ht val = do let key = encBlock val
+                        st <- getState
+                        if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+                          then do liftIO $ HT.insert ht key val
+                                  return ht
+                          else say "this key does not belong to us" >> return ht
