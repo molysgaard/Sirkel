@@ -46,25 +46,12 @@ instance Binary Block where
                      return $ BlockFound bs
 -- }}}
 
--- {{{ remoteGetBlock
-remoteGetBlock :: Integer -> ProcessId -> ProcessM ()
-remoteGetBlock key caller = do
-    st <- getState
-    block <- liftIO $ catch (BS.readFile ((blockDir st) ++ (show key)) >>= (\x -> return $ BlockFound x)) (\e -> return BlockError)
-    send caller block
--- }}}
-
--- {{{ remotePutBlock
-remotePutBlock block = do
-    st <- getState
-    let key = encBlock block
-    liftIO $ BS.writeFile ((blockDir st) ++ (show key)) block
-
+-- {{{ encBlock
 encBlock :: BS.ByteString -> Integer 
 encBlock n = integerDigest . sha1 $ encode n
 -- }}}
 
-$( remotable ['remoteGetBlock, 'remotePutBlock] )
+$( remotable [] )
 
 -- {{{ getBlock
 getBlock :: Integer -> ProcessM (Maybe BS.ByteString)
