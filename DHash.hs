@@ -113,6 +113,8 @@ getBlockPid node = do
                    Nothing -> say "Dhash block store not initialized, state-process is not running" >> (liftIO (threadDelay 5000000)) >> getStatePid
                    Just pid -> return pid
 
+-- {{{ Datatypes
+-- | Datatype encapsulating the things we can do with the HashTable
 data DHash = Insert BS.ByteString | Lookup Integer ProcessId | Delete Integer | Janitor deriving (Eq, Show, Typeable)
 instance Binary DHash where
   put (Insert a) = do put (0 :: Word8)
@@ -122,6 +124,7 @@ instance Binary DHash where
                             put pid
   put (Delete key) = do put (2 :: Word8)
                         put key
+  put Janitor = do put (3 :: Word8)
   get = do flag <- getWord8
            case flag of
              0 -> do val <- get
@@ -131,19 +134,31 @@ instance Binary DHash where
                      return $ Lookup key pid
              2 -> do key <- get
                      return $ Delete key
+             3 -> return Janitor
 
 type DHashTable = HT.LinearHashTable Integer (Bool,BS.ByteString)
+-- }}}
 
+-- | sendBlock is a function to send a block from a lookup in the HashTable.
+-- We do this in a separate thread because we don't want to block lookups etc.
+-- while we are sending.
+-- TODO there have to be some sort of queue here in the future, to limit the
+-- upload
 sendBlock :: Maybe (Bool, BS.ByteString) -> ProcessId -> ProcessM ()
-sendBlock Nothing pid = do ptry (send pid BlockError) :: ProcessM (Either TransmitException ())
-                           return ()
-sendBlock (Just (_, bs)) pid = do ptry (send pid (BlockFound bs)) :: ProcessM (Either TransmitException ())
-                                  return ()
+sendBlock Nothing pid = do
+    ptry (send pid BlockError) :: ProcessM (Either TransmitException ())
+    return ()
+sendBlock (Just (_, bs)) pid = do
+    ptry (send pid (BlockFound bs)) :: ProcessM (Either TransmitException ())
+    return ()
 
+-- | initBlockStore starts the BlockStore and handles requests to
+-- insert, lookup and delete blocks as well as the janitor process
+-- to check if ownership of any block has changed
 initBlockStore :: DHashTable -> ProcessM ()
 initBlockStore ht' = do
   nameSet "DHASH-BLOCK-STORE"
-  spawnLocal sceduler
+  spawnLocal janitorSceduler
   loop ht'
   where loop :: DHashTable -> ProcessM ()
         loop ht = do
@@ -151,11 +166,11 @@ initBlockStore ht' = do
               [ matchIf (\x -> case x of
                                  (Insert _) -> True
                                  _ -> False)
-                        (\(Insert val) -> jok ht val)
+                        (\(Insert val) -> insertBlock ht val)
               , matchIf (\x -> case x of
                                (Lookup _ _) -> True
                                _ -> False)
-                        (\(Lookup key pid) -> lok key pid ht)
+                        (\(Lookup key pid) -> lookupBlock key pid ht)
               , matchIf (\x -> case x of
                                Janitor -> True
                                _ -> False)
@@ -163,37 +178,42 @@ initBlockStore ht' = do
               , matchIf (\x -> case x of
                                (Delete _) -> True
                                _ -> False)
-                        (\(Delete key) -> tok ht key) ]
+                        (\(Delete key) -> deleteBlock ht key) ]
             loop newHt
 
-        lok :: Integer -> ProcessId -> DHashTable -> ProcessM DHashTable
-        lok key pid ht = do answ <- liftIO $ HT.lookup ht key
-                            spawnLocal (sendBlock answ pid)
-                            return ht
+        lookupBlock :: Integer -> ProcessId -> DHashTable -> ProcessM DHashTable
+        lookupBlock key pid ht = do answ <- liftIO $ HT.lookup ht key
+                                    spawnLocal (sendBlock answ pid)
+                                    return ht
 
-        tok :: DHashTable -> Integer -> ProcessM DHashTable
-        tok ht key = do liftIO $ HT.delete ht key
-                        return ht
+        deleteBlock :: DHashTable -> Integer -> ProcessM DHashTable
+        deleteBlock ht key = do liftIO $ HT.delete ht key
+                                return ht
 
-        jok :: DHashTable -> BS.ByteString -> ProcessM DHashTable
-        jok ht val = do let key = encBlock val
-                        st <- getState
-                        if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
-                          then do liftIO $ HT.insert ht key (True, val)
-                                  mapM (putBlock' val) (successors st)
-                                  return ht
-                          else do liftIO $ HT.insert ht key (False, val)
-                                  say "replicating"
-                                  return ht
+        insertBlock :: DHashTable -> BS.ByteString -> ProcessM DHashTable
+        insertBlock ht val = do 
+            let key = encBlock val
+            st <- getState
+            if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+              then do liftIO $ HT.insert ht key (True, val)
+                      mapM (putBlock' val) (successors st)
+                      return ht
+              else do liftIO $ HT.insert ht key (False, val)
+                      say "replicating"
+                      return ht
 
+-- | janitor takes the DHashTable and checks if the ownership of blocks
+-- has changed sice last time. If so it updates replication etc.
 janitor :: DHashTable -> ProcessM DHashTable
 janitor ht = do ns <- liftIO $ HT.toList ht
                 st <- getState
                 ns' <- mapM (fix st) ns
                 liftIO $ HT.fromList ns'
 
-sceduler :: ProcessM ()
-sceduler = do
+-- | janitorSceduler is a process that periodically sends a "janitor"
+-- message to the block manager, this because we don't have MVar etc.
+janitorSceduler :: ProcessM ()
+janitorSceduler = do
          self <- getSelfNode
          pid <- getBlockPid self
          loop pid
@@ -202,6 +222,8 @@ sceduler = do
              send pid Janitor
              loop pid
 
+-- | fix function that looks on one block in the HashTable
+-- and checks if ownership hash changed.
 fix :: NodeState -> (Integer, (Bool,BS.ByteString)) -> ProcessM (Integer, (Bool,BS.ByteString))
 fix st entry@(key, (True, bs)) = do
    if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
