@@ -87,13 +87,16 @@ getBlock' key (s:su) = do
                                 else return Nothing
 -- }}}
 
--- {{{ putBlock
+-- {{{ putBlock, puts a block, returns the successor of that block. You will
+-- also find the block replicated on the (r st) next nodes
+putBlock ::  BS.ByteString -> ProcessM (Integer, NodeId)
 putBlock bs = do
     let key = encBlock bs
     succs <- findSuccessor key
-    ns <- mapM (putBlock' bs) succs
+    ns <- putBlock' bs (head succs)
     return (key, ns)
 
+-- | putBlock' put a block on a node we know
 putBlock' :: BS.ByteString -> NodeId -> ProcessM NodeId
 putBlock' bs succ = do
     pid <- getBlockPid succ
@@ -110,7 +113,7 @@ getBlockPid node = do
                    Nothing -> say "Dhash block store not initialized, state-process is not running" >> (liftIO (threadDelay 5000000)) >> getStatePid
                    Just pid -> return pid
 
-data DHash = Insert BS.ByteString | Lookup Integer ProcessId | Delete Integer deriving (Eq, Show, Typeable)
+data DHash = Insert BS.ByteString | Lookup Integer ProcessId | Delete Integer | Janitor deriving (Eq, Show, Typeable)
 instance Binary DHash where
   put (Insert a) = do put (0 :: Word8)
                       put a
@@ -129,17 +132,18 @@ instance Binary DHash where
              2 -> do key <- get
                      return $ Delete key
 
-type DHashTable = HT.LinearHashTable Integer BS.ByteString
+type DHashTable = HT.LinearHashTable Integer (Bool,BS.ByteString)
 
-sendBlock :: Maybe BS.ByteString -> ProcessId -> ProcessM ()
+sendBlock :: Maybe (Bool, BS.ByteString) -> ProcessId -> ProcessM ()
 sendBlock Nothing pid = do ptry (send pid BlockError) :: ProcessM (Either TransmitException ())
                            return ()
-sendBlock (Just bs) pid = do ptry (send pid (BlockFound bs)) :: ProcessM (Either TransmitException ())
-                             return ()
+sendBlock (Just (_, bs)) pid = do ptry (send pid (BlockFound bs)) :: ProcessM (Either TransmitException ())
+                                  return ()
 
 initBlockStore :: DHashTable -> ProcessM ()
 initBlockStore ht' = do
   nameSet "DHASH-BLOCK-STORE"
+  spawnLocal sceduler
   loop ht'
   where loop :: DHashTable -> ProcessM ()
         loop ht = do
@@ -152,6 +156,10 @@ initBlockStore ht' = do
                                (Lookup _ _) -> True
                                _ -> False)
                         (\(Lookup key pid) -> lok key pid ht)
+              , matchIf (\x -> case x of
+                               Janitor -> True
+                               _ -> False)
+                        (\Janitor -> janitor ht)
               , matchIf (\x -> case x of
                                (Delete _) -> True
                                _ -> False)
@@ -171,6 +179,42 @@ initBlockStore ht' = do
         jok ht val = do let key = encBlock val
                         st <- getState
                         if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
-                          then do liftIO $ HT.insert ht key val
+                          then do liftIO $ HT.insert ht key (True, val)
+                                  mapM (putBlock' val) (successors st)
                                   return ht
-                          else say "this key does not belong to us" >> return ht
+                          else do liftIO $ HT.insert ht key (False, val)
+                                  say "replicating"
+                                  return ht
+
+janitor :: DHashTable -> ProcessM DHashTable
+janitor ht = do ns <- liftIO $ HT.toList ht
+                st <- getState
+                ns' <- mapM (fix st) ns
+                liftIO $ HT.fromList ns'
+
+sceduler :: ProcessM ()
+sceduler = do
+         self <- getSelfNode
+         pid <- getBlockPid self
+         loop pid
+  where loop pid = do
+             liftIO (threadDelay 5000000)
+             send pid Janitor
+             loop pid
+
+fix :: NodeState -> (Integer, (Bool,BS.ByteString)) -> ProcessM (Integer, (Bool,BS.ByteString))
+fix st entry@(key, (True, bs)) = do
+   if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+     then return entry
+     else do 
+             say "we are no longer responsible for this block"
+             putBlock bs
+             return (key,(False,bs))
+
+fix st entry@(key, (False, bs)) = do
+   if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+     then do 
+             say "we are the new block owner"
+             mapM_  (putBlock' bs) (successors st)
+             return (key,(True,bs))
+     else return entry
