@@ -1,8 +1,10 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
 module DHash where
 
---TODO the node responsible for a key needs some way of telling other nodes how to replicate it's key.
---the nodes that take the burden for replicating also needs some way of verifing that they have the responsebility for the block
+--TODO A block is put on node A and replicated on node B.
+--     Then node B leaves.
+--     Then the next node in the ring, node C, does not recieve a replicate command.
+--     Only if node A leaves and there exits replicas will the replicas be correctly reinserted
 
 import Remote.Call
 import Remote.Channel
