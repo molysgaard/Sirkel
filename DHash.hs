@@ -93,6 +93,16 @@ putBlock' bs succ = do
       Right _ -> return succ
 -- }}}
 
+-- {{{ deleteBlock
+deleteBlock :: Integer -> ProcessM Bool
+deleteBlock key = do
+    succs <- findSuccessor key
+    blockPid <- getBlockPid (head succs)
+    flag <- ptry $ send blockPid (Delete key) :: ProcessM (Either TransmitException ())
+    case flag of
+      Left _ -> say "Delete failed" >> return True
+      Right _ -> say "Delete sent" >> return False
+
 getBlockPid :: NodeId -> ProcessM ProcessId
 getBlockPid node = do 
                  statePid <- nameQuery node "DHASH-BLOCK-STORE"
@@ -165,7 +175,7 @@ initBlockStore ht' = do
               , matchIf (\x -> case x of
                                (Delete _) -> True
                                _ -> False)
-                        (\(Delete key) -> deleteBlock ht key) ]
+                        (\(Delete key) -> removeBlock ht key) ]
             loop newHt
 
         lookupBlock :: Integer -> ProcessId -> DHashTable -> ProcessM DHashTable
@@ -173,17 +183,33 @@ initBlockStore ht' = do
                                     spawnLocal (sendBlock answ pid)
                                     return ht
 
-        deleteBlock :: DHashTable -> Integer -> ProcessM DHashTable
-        deleteBlock ht key = do liftIO $ HT.delete ht key
-                                return ht
+        removeBlock :: DHashTable -> Integer -> ProcessM DHashTable
+        removeBlock ht key = do 
+            st <- getState
+            -- if we are the owner of the block, also send delete
+            -- to all the replicas
+            -- else just delete our copy
+            if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+              then do liftIO $ HT.delete ht key
+                      bs <- mapM getBlockPid (successors st)
+                      say "deleting replicas"
+                      mapM_ ((flip send) (Delete key)) bs
+                      return ht
+              else do liftIO $ HT.delete ht key
+                      return ht
 
         insertBlock :: DHashTable -> BS.ByteString -> ProcessM DHashTable
         insertBlock ht val = do 
             let key = encBlock val
             st <- getState
+            -- if we are the right owner of this block
+            -- or if we are just replicating
+            -- TODO would be smart to check if we should be
+            -- replicating but it is not trivial without a predecessor list
+            -- wich is not implemented at this time
             if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
               then do liftIO $ HT.insert ht key (True, val)
-                      mapM (putBlock' val) (successors st)
+                      mapM_ (putBlock' val) (successors st)
                       return ht
               else do liftIO $ HT.insert ht key (False, val)
                       say "replicating"

@@ -59,6 +59,9 @@ userInput = do line <- liftIO $ hGetLine stdin
                   "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
                               succ <- findSuccessor num
                               say $ sh . fm . cNodeId . head $ succ
+                  "del" -> do let num  = ((read (drop 4 line)) :: Integer)
+                              succ <- deleteBlock num
+                              say $ "Trying to delete: " ++ (show num)
                   "sta" -> do st <- getState
                               say (show st)
                   "id" -> do st <- getState
