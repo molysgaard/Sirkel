@@ -23,7 +23,7 @@ import Data.List (foldl')
 
 import Data.Digest.Pure.SHA
 import Data.Binary
-import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy.Char8 as BS
 import IO
 -- for helper debug
 import qualified Data.List as List
@@ -37,11 +37,11 @@ import Chord
 import DHash
 main = remoteInit Nothing [Chord.__remoteCallMetaData, DHash.__remoteCallMetaData] run
 
-run str = do bootStrap initState str
-             spawnLocal randomFinds
-             ht <- liftIO $ HT.new
-             spawnLocal $ initBlockStore ht
-             userInput
+run str = do bootStrap initState str -- ^ Start the chord ring
+             --spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
+             ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
+             spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
+             userInput -- ^ this is for debug, it's our window into whats happening ;)
 
 -- {{{ userInput
 -- | debug function, reads a 0.[0-9] number from command line and runs findSuccessor on it in the DHT
@@ -52,7 +52,7 @@ userInput = do line <- liftIO $ hGetLine stdin
                    fm = fromRational . (% x)
                    sh = (take 5) . show
                case (take 3 line) of
-                  "put" -> do holder <- putBlock (BS.pack (drop 4 line))
+                  "put" -> do holder <- putObject (drop 4 line)
                               say $ show holder
                   "get" -> do resp <- getBlock ((read (drop 4 line)) :: Integer)
                               say $ show resp
@@ -77,7 +77,9 @@ initState = NodeState {
         , predecessor = undefined
         , timeout = 10 -- ^ The timout latency of ping
         , m = 160 -- ^ The number of bits in a key, ususaly 160
-        , r = 2 -- ^ the number of successors and replicas
+        , r = 2 -- ^ the number of successors
+        , b = 2 -- ^ the nuber of replicas
+        , blockSize = 10 -- ^ the number of bytes a block is
         }
 
 -- {{{ randomFinds

@@ -34,7 +34,9 @@ import Data.List (foldl')
 
 import Data.Digest.Pure.SHA
 import Data.Binary
-import qualified Data.ByteString.Char8 as BS
+import qualified Data.ByteString.Lazy.Char8 as BS
+
+import Data.Int
 
 import IO
 -- }}}
@@ -70,7 +72,9 @@ data NodeState = NodeState {
         , predecessor :: NodeId
         , timeout :: Int -- ^ The timout latency of ping
         , m :: Integer -- ^ The number of bits in a key, ususaly 160
-        , r :: Integer -- ^ The number of replicated blocks and nodes in the successor list
+        , r :: Int -- ^ The number of in the successor list, eg. 16
+        , b :: Int -- ^ The number of replicas of each block, (b <= r)
+        , blockSize :: Int64 -- ^ The number of bytes each block fills
         } deriving (Show)
 
 instance Binary NodeState where
@@ -81,6 +85,8 @@ instance Binary NodeState where
 	     put (timeout a)
 	     put (m a)
              put (r a)
+             put (b a)
+             put (blockSize a)
   get = do se <- get
            ft <- get
            bd <- get
@@ -88,7 +94,9 @@ instance Binary NodeState where
 	   ti <- get
 	   m <- get
            r <- get
-	   return (NodeState { self = se, fingerTable = ft, blockDir = bd, predecessor = pr, timeout = ti, m=m, r=r })
+           b <- get
+           blockSize <- get
+	   return (NodeState { self = se, fingerTable = ft, blockDir = bd, predecessor = pr, timeout = ti, m=m, r=r, b=b, blockSize=blockSize })
 
 successor :: NodeState -> Maybe NodeId
 successor st
@@ -130,23 +138,23 @@ closestPreceding st key = closestPreceding' st (fingerTable st) key (m st) []
 
 closestPreceding' :: NodeState -> FingerTable -> Integer -> Integer -> [NodeId] -> [NodeId]
 closestPreceding' st fingers key 0 ns
-  | length ns >= fromInteger (r st) = ns
+  | length ns >= (r st) = ns
   | otherwise = (self st):ns
 closestPreceding' st fingers key i ns
-  | length ns >= fromInteger (r st) = ns
+  | length ns >= (r st) = ns
 
   | (Just (SuccessorList hits)) <- lookopAndIf i fingers isBetween
-  , length ns < fromInteger (r st)
-  , (length ns) + (length hits) > fromInteger (r st)
-  = closestPreceding' st fingers key (i-1) (nub ((take ((fromInteger (r st)) - (length ns)) hits)++ns))-- we have to add a part of the successor list
+  , length ns < (r st)
+  , (length ns) + (length hits) > (r st)
+  = closestPreceding' st fingers key (i-1) (nub ((take ((r st) - (length ns)) hits)++ns))-- we have to add a part of the successor list
 
   | (Just (SuccessorList hits)) <- lookopAndIf i fingers isBetween
-  , length ns < fromInteger (r st) -- We need more
-  , (length ns) + (length hits) > fromInteger (r st) -- 
+  , length ns < r st -- We need more
+  , (length ns) + (length hits) > r st
   = closestPreceding' st fingers key (i-1) (nub (hits++ns))-- we take the whole succesor list
 
   | (Just (FingerNode hit)) <- lookopAndIf i fingers isBetween
-  , length ns < fromInteger (r st)
+  , length ns < r st
   = closestPreceding' st fingers key (i-1) (nub (hit:ns))
 
   | otherwise = closestPreceding' st fingers key (i-1) ns
@@ -198,10 +206,10 @@ addFinger newFinger st
           n = cNodeId (self st)
 
 addToSuccessorList :: NodeState -> NodeId -> [NodeId] -> [NodeId] -> FingerEntry
-addToSuccessorList st node prev [] = SuccessorList . (take (fromInteger (r st))) . nub $ (prev ++ [node])
+addToSuccessorList st node prev [] = SuccessorList . (take (r st)) . nub $ (prev ++ [node])
   where nub = (map head) . List.group
 addToSuccessorList st node prev (cur:next)
-  | between (cNodeId node) (cNodeId . self $ st) (cNodeId cur) = SuccessorList $ prev ++ [node] ++ (take ((fromInteger (r st)) - (length prev + 1)) next)
+  | between (cNodeId node) (cNodeId . self $ st) (cNodeId cur) = SuccessorList $ prev ++ [node] ++ (take ((r st) - (length prev + 1)) next)
   | otherwise = addToSuccessorList st node (prev ++ [cur]) next
 
 addFingers :: [NodeId] -> NodeState -> NodeState
