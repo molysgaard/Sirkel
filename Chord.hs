@@ -279,15 +279,15 @@ getState = do statePid <- getStatePid
                 Nothing -> say "asked for state but state process did not return within timeout, retrying" >> getState
                 Just st -> return st
 
-modifyState :: (NodeState -> NodeState) -> ProcessM ()
+modifyState :: (NodeState -> NodeState) -> ProcessM NodeState
 modifyState f = do
                  statePid <- getStatePid
                  selfPid <- getSelfPid
                  send statePid (TakeState selfPid)
                  ret <- receiveTimeout 10000000 [ match (\(RetTakeState st) -> return st) ]
                  case ret of
-                   Nothing -> say "asked for modify, timeout, ignoring and continuing" >> return ()
-                   Just st -> send statePid (PutState (f st))
+                   Nothing -> say "asked for modify, timeout, retrying" >> liftIO (threadDelay 50000000) >> modifyState f
+                   Just st -> send statePid (PutState (f st)) >> return (f st)
 
 getStatePid :: ProcessM ProcessId
 getStatePid = do nid <- getSelfNode
@@ -333,10 +333,11 @@ getPred = do st <- getState
 
 -- {{{ notify
 -- | notifier is telling you he thinks he is your predecessor, check if it's true.
+notify :: NodeId -> ProcessM ()
 notify notifier = do
   st <- getState
   if between (cNodeId notifier) (cNodeId . predecessor $ st) (cNodeId . self $ st)
-    then say "New predecessor" >> modifyState (\x -> x {predecessor = notifier})
+    then say "New predecessor" >> modifyState (\x -> x {predecessor = notifier}) >> return ()
     else return ()
 -- }}}
 
@@ -350,8 +351,7 @@ $( remotable ['relayFndSucc, 'getPred, 'notify, 'ping] )
 -- | Joins a chord ring. Takes the id of a known node to bootstrap from.
 joinChord :: NodeId -> ProcessM ()
 joinChord node = do
-    modifyState (addFinger node)
-    st <- getState
+    st <- modifyState (addFinger node)
     say $ "Join on: " ++ (show node)
     succ <- liftM (head . fromJust) $ remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
     say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node))
@@ -423,14 +423,11 @@ stabilize = do
                         then do succPred <- callRemote succ getPred__closure
                                 if between (cNodeId succPred) (cNodeId . self $ st) (cNodeId succ)
                                   then do modifyState (addFinger succPred)
-                                          st' <- getState
-                                          ptry $ spawn succ (notify__closure (self st')) :: ProcessM (Either TransmitException ProcessId)
+                                          ptry $ spawn succ (notify__closure (self st)) :: ProcessM (Either TransmitException ProcessId)
                                           say ("New succ: " ++ (show succPred)) >> stabilize
                                   else do ptry (spawn succ (notify__closure (self st))) :: ProcessM (Either TransmitException ProcessId)
                                           stabilize
                          else do say "Successor is dead, restabilizing"
-                                 st' <- getState
-                                 say (show . length . Map.elems . fingerTable $ st')
                                  findSuccessor $ mod ((cNodeId . self $ st) + 1) (2^(m st))
                                  stabilize
     Nothing -> stabilize
