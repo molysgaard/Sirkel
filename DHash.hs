@@ -306,3 +306,14 @@ putObject a = do st <- getState
                  let bs = (chunkBs st) . encode $ a
                  mapM putBlock bs
 -- }}}
+
+-- {{{ getObject
+getObject ::  (Binary a) => [Integer] -> ProcessM (Maybe a)
+getObject keys = liftM (liftM decode) $ liftM test $ mapM getBlock keys
+
+test ::  [Maybe BS.ByteString] -> Maybe BS.ByteString
+test blocks
+  | any (== Nothing) blocks = Nothing
+  | otherwise = Just . BS.concat . catMaybes $ blocks
+
+-- }}}

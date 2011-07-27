@@ -53,8 +53,8 @@ userInput = do line <- liftIO $ hGetLine stdin
                    sh = (take 5) . show
                case (take 3 line) of
                   "put" -> do holder <- putObject (drop 4 line)
-                              say $ show holder
-                  "get" -> do resp <- getBlock ((read (drop 4 line)) :: Integer)
+                              say . show . (map fst) $ holder
+                  "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) :: ProcessM (Maybe String)
                               say $ show resp
                   "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
                               succ <- findSuccessor num
