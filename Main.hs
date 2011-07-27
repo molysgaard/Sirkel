@@ -8,7 +8,6 @@ import Remote.Process
 import Remote.Init
 import Remote.Encoding
 import Remote.Reg
-import Remote
 
 import Control.Monad (liftM)
 import Data.Typeable
