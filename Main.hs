@@ -58,7 +58,7 @@ userInput = do line <- liftIO $ hGetLine stdin
                               say $ show resp
                   "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
                               tmp_howMany <- liftIO $ hGetLine stdin
-                              let howMany = read line :: Int
+                              let howMany = read tmp_howMany :: Int
                               succ <- findSuccessors num howMany
                               say $ show . (map (fm . cNodeId)) $ succ
                   "del" -> do let num  = ((read (drop 4 line)) :: Integer)
