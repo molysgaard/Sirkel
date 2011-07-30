@@ -120,18 +120,16 @@ data FingerResults = Has [NodeId] | HasNot | Empty
 -- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
 hasSuccessor :: NodeState -> Integer -> Int -> FingerResults
 hasSuccessor st key howMany
-  | cond
-  , between key (cNodeId (self st)) (cNodeId (head ss))
+  | List.null ss = Empty
+  | between key (cNodeId (self st)) (cNodeId (head ss) + 1)
   = Has ss
-  | cond
-  = hasSuccessor' st key howMany ss
-  | otherwise = Empty
+  | otherwise = hasSuccessor' st key howMany (tail ss)
   where ss = successors st
-        cond = List.null ss
 
 
 -- | If we have enough successors in our list we return them if they 
 -- are successors of the key
+hasSuccessor' _ _ _ [] = HasNot
 hasSuccessor' st key howMany succ@(s:ss)
   | length succ < howMany = HasNot
   | between key (cNodeId (self st)) ((cNodeId s) + 1) = Has succ
@@ -308,6 +306,7 @@ getStatePid = do nid <- getSelfNode
 -- | else you relay the query forward
 relayFndSucc :: NodeId -> ProcessId -> Integer -> Int -> ProcessM ()
 relayFndSucc nid caller key howMany = do
+  say $ "How many: " ++ (show howMany)
   modifyState (\x -> addFinger (nodeFromPid caller) (addFinger nid x))
   st <- getState
   let x = 2^(m st) :: Integer
@@ -466,7 +465,7 @@ remoteFindSuccessor' _ _ _ 0 = return Nothing
 remoteFindSuccessor' node key howMany tries = do
   st <- getState
   selfPid <- getSelfPid
-  ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer) howMany) :: ProcessM (Either TransmitException ProcessId)
+  ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer) (howMany :: Int)) :: ProcessM (Either TransmitException ProcessId)
   succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe [NodeId])
   case succ of
     Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor' node (key :: Integer) howMany (tries - 1)
