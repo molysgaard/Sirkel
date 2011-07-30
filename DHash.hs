@@ -56,15 +56,15 @@ encBlock n = integerDigest . sha1 $ n
 $( remotable [] )
 
 -- {{{ getBlock
-getBlock :: Integer -> ProcessM (Maybe BS.ByteString)
-getBlock key = do
-    succ <- findSuccessors key
-    getBlock' key succ
+getBlock :: Integer -> Int -> ProcessM (Maybe BS.ByteString)
+getBlock key howMany = do
+    succ <- findSuccessors key howMany
+    getBlock' key howMany succ
 
 -- getBlock' gets a block from a node we know has it
-getBlock' :: Integer -> [NodeId] -> ProcessM (Maybe BS.ByteString)
-getBlock' _ [] = return Nothing
-getBlock' key (s:su) = do
+getBlock' :: Integer -> Int -> [NodeId] -> ProcessM (Maybe BS.ByteString)
+getBlock' _ _ [] = return Nothing
+getBlock' key howMany (s:su) = do
     ret <- getBlockPid s
     case ret of
       Just blockPid -> do
@@ -72,12 +72,12 @@ getBlock' key (s:su) = do
           flag <- ptry $ send blockPid (Lookup key selfPid) :: ProcessM (Either TransmitException ())
           block <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe Block)
           case block of
-            Nothing -> say "GetBlock timed out, retrying" >> liftIO (threadDelay 5000000) >> getBlock key
-            Just BlockError -> say "Block error" >> getBlock' key su
+            Nothing -> say "GetBlock timed out, retrying" >> liftIO (threadDelay 5000000) >> getBlock key howMany
+            Just BlockError -> say "Block error" >> getBlock' key howMany su
             Just (BlockFound bs) -> if encBlock bs == key
                                       then return (Just bs)
                                       else return Nothing
-      Nothing -> say "GetBlock timed out, retrying" >> liftIO (threadDelay 5000000) >> getBlock key
+      Nothing -> say "GetBlock timed out, retrying" >> liftIO (threadDelay 5000000) >> getBlock key howMany
 -- }}}
 
 -- {{{ putBlock, puts a block, returns the successor of that block. You will
@@ -86,7 +86,7 @@ getBlock' key (s:su) = do
 putBlock ::  BS.ByteString -> ProcessM (Integer, NodeId)
 putBlock bs = do
     let key = encBlock bs
-    succs <- findSuccessors key
+    succs <- findSuccessors key 1
     putBlock' bs key (head succs)
 
 -- | putBlock' put a block on a node we know
@@ -105,7 +105,7 @@ putBlock' bs key succ = do
 -- {{{ deleteBlock
 deleteBlock :: Integer -> ProcessM Bool
 deleteBlock key = do
-    succs <- findSuccessors key
+    succs <- findSuccessors key 1
     ret <- getBlockPid (head succs)
     case ret of
       Just blockPid -> do
@@ -307,8 +307,8 @@ putObject a = do st <- getState
 -- }}}
 
 -- {{{ getObject
-getObject ::  (Binary a) => [Integer] -> ProcessM (Maybe a)
-getObject keys = liftM (liftM decode) $ liftM test $ mapM getBlock keys
+getObject ::  (Binary a) => [Integer] -> Int -> ProcessM (Maybe a)
+getObject keys howMany = liftM (liftM decode) $ liftM test $ mapM (\k -> getBlock k howMany) keys
 
 test ::  [Maybe BS.ByteString] -> Maybe BS.ByteString
 test blocks

@@ -46,6 +46,7 @@ run str = do bootStrap initState str -- ^ Start the chord ring
 -- | debug function, reads a 0.[0-9] number from command line and runs findSuccessors on it in the DHT
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
+               st <- getState
                let x = 2^160 :: Integer
                    fm :: Integer -> Double
                    fm = fromRational . (% x)
@@ -53,11 +54,13 @@ userInput = do line <- liftIO $ hGetLine stdin
                case (take 3 line) of
                   "put" -> do holder <- putObject (drop 4 line)
                               say . show . (map fst) $ holder
-                  "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) :: ProcessM (Maybe String)
+                  "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) (r st) :: ProcessM (Maybe String)
                               say $ show resp
                   "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
-                              succ <- findSuccessors num
-                              say $ sh . fm . cNodeId . head $ succ
+                              tmp_howMany <- liftIO $ hGetLine stdin
+                              let howMany = read line :: Int
+                              succ <- findSuccessors num howMany
+                              say $ show . (map (fm . cNodeId)) $ succ
                   "del" -> do let num  = ((read (drop 4 line)) :: Integer)
                               succ <- deleteBlock num
                               say $ "Trying to delete: " ++ (show num)
@@ -87,7 +90,7 @@ randomFinds = do
   liftIO $ threadDelay 8000000 -- 8 sec
   st <- getState
   key <- liftIO $ randomRIO (1, 2^(m st)) :: ProcessM Integer
-  succ <- findSuccessors key
+  succ <- findSuccessors key (r st)
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)

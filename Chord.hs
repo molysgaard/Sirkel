@@ -118,17 +118,24 @@ data FingerResults = Has [NodeId] | HasNot | Empty
 -- {{{ algorithmic stuff
 -- {{{ hasSuccessor
 -- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
-hasSuccessor :: NodeState -> Integer -> FingerResults
-hasSuccessor st key
-  | False <- List.null (successors st) = do
-   let n = cNodeId (self st)
-       maySuccs = successors st
-   case maySuccs of
-     [] -> HasNot
-     succs -> if between key n ((cNodeId . head $ succs) + 1)
-                    then Has succs
-                    else HasNot
+hasSuccessor :: NodeState -> Integer -> Int -> FingerResults
+hasSuccessor st key howMany
+  | cond
+  , between key (cNodeId (self st)) (cNodeId (head ss))
+  = Has ss
+  | cond
+  = hasSuccessor' st key howMany ss
   | otherwise = Empty
+  where ss = successors st
+        cond = List.null ss
+
+
+-- | If we have enough successors in our list we return them if they 
+-- are successors of the key
+hasSuccessor' st key howMany succ@(s:ss)
+  | length succ < howMany = HasNot
+  | between key (cNodeId (self st)) ((cNodeId s) + 1) = Has succ
+  | otherwise = hasSuccessor' st key howMany ss
 -- }}}
 
 -- {{{ closestPrecedingNode
@@ -299,8 +306,8 @@ getStatePid = do nid <- getSelfNode
 -- {{{ relayFndSucc
 -- | someone asks you for a successor, if you know it you reply to the original caller,
 -- | else you relay the query forward
-relayFndSucc :: NodeId -> ProcessId -> Integer -> ProcessM ()
-relayFndSucc nid caller key = do
+relayFndSucc :: NodeId -> ProcessId -> Integer -> Int -> ProcessM ()
+relayFndSucc nid caller key howMany = do
   modifyState (\x -> addFinger (nodeFromPid caller) (addFinger nid x))
   st <- getState
   let x = 2^(m st) :: Integer
@@ -308,7 +315,7 @@ relayFndSucc nid caller key = do
       fm = fromRational . (% x)
       sh :: Integer -> String
       sh = (take 5) . show
-  case (hasSuccessor st key) of
+  case (hasSuccessor st key howMany) of
       (Has suc) -> do 
              send caller suc -- we have the successor of the node
       HasNot -> do
@@ -316,9 +323,9 @@ relayFndSucc nid caller key = do
           case recv == (self st) of
             False -> do
               let clos = $( mkClosureRec 'relayFndSucc )
-              flag <- ptry $ spawn recv (clos (self st) caller key) :: ProcessM (Either TransmitException ProcessId)
+              flag <- ptry $ spawn recv (clos (self st) caller key howMany) :: ProcessM (Either TransmitException ProcessId)
               case flag of
-                Left _ -> modifyState (removeFinger recv) >> relayFndSucc nid caller key -- spawning failed
+                Left _ -> modifyState (removeFinger recv) >> relayFndSucc nid caller key howMany -- spawning failed
 	        Right _ -> return ()
             True -> do
               say "THIS IS WRONG!" -- this should never happen because we should not be in the fingertable
@@ -352,7 +359,7 @@ joinChord :: NodeId -> ProcessM ()
 joinChord node = do
     st <- modifyState (addFinger node)
     say $ "Join on: " ++ (show node)
-    succ <- liftM (head . fromJust) $ remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st))
+    succ <- liftM (head . fromJust) $ remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st)) (r st)
     say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node))
     buildFingers succ
     sst <- getState
@@ -427,7 +434,7 @@ stabilize = do
                                   else do ptry (spawn succ (notify__closure (self st))) :: ProcessM (Either TransmitException ProcessId)
                                           stabilize
                          else do say "Successor is dead, restabilizing"
-                                 findSuccessors $ mod ((cNodeId . self $ st) + 1) (2^(m st))
+                                 findSuccessors (mod ((cNodeId . self $ st) + 1) (2^(m st))) (r st)
                                  stabilize
     Nothing -> stabilize
 -- }}}
@@ -435,34 +442,34 @@ stabilize = do
 -- {{{ findSuccessors
 -- | YOU are wordering who's the successor of a certain key, if you don't know yourself
 -- | you relay it forward with YOU as the original caller.
-findSuccessors :: Integer -> ProcessM [NodeId]
-findSuccessors key = do
+findSuccessors :: Integer -> Int -> ProcessM [NodeId]
+findSuccessors key howMany = do
   st <- getState
-  case (hasSuccessor st key) of
+  case (hasSuccessor st key howMany) of
       (Has suc) -> return suc
       Empty -> return [self st]
       HasNot -> do
           selfPid <- getSelfPid -- ^ get your pid
           let recv = last $ closestPreceding st key -- | find the next to relay to
           case recv == (self st) of
-            False -> do ret <- remoteFindSuccessor recv key
+            False -> do ret <- remoteFindSuccessor recv key howMany
                         case ret of 
-                          Nothing -> modifyState (removeFinger recv) >> findSuccessors key
+                          Nothing -> modifyState (removeFinger recv) >> findSuccessors key howMany
                           Just succ -> return succ
-            True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessors key
+            True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessors key howMany
 -- }}}
 
 -- {{{ remoteFindSuccessor
-remoteFindSuccessor :: NodeId -> Integer -> ProcessM (Maybe [NodeId])
-remoteFindSuccessor node key = remoteFindSuccessor' node key 2
-remoteFindSuccessor' _ _ 0 = return Nothing
-remoteFindSuccessor' node key tries = do
+remoteFindSuccessor :: NodeId -> Integer -> Int -> ProcessM (Maybe [NodeId])
+remoteFindSuccessor node key howMany = remoteFindSuccessor' node key howMany 2
+remoteFindSuccessor' _ _ _ 0 = return Nothing
+remoteFindSuccessor' node key howMany tries = do
   st <- getState
   selfPid <- getSelfPid
-  ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer)) :: ProcessM (Either TransmitException ProcessId)
+  ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer) howMany) :: ProcessM (Either TransmitException ProcessId)
   succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe [NodeId])
   case succ of
-    Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor' node (key :: Integer) (tries - 1)
+    Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor' node (key :: Integer) howMany (tries - 1)
     Just conts -> do
                 modifyState (addFingers conts)
                 return (Just conts)
@@ -474,11 +481,11 @@ buildFingers buildNode = do
                       say $ "buildNode is: " ++ (show buildNode)
                       st <- getState
                       nodeId <- getSelfNode
-                      let f i = remoteFindSuccessor buildNode i
-                          nodids = map (fingerVal st) r
-                          r = [1 .. (m $ st)]
-                      fingers <- sequence $ map f nodids
-                      return ()
+                      let f :: Integer -> ProcessM (Maybe [NodeId])
+                          f i = remoteFindSuccessor buildNode i (r st)
+                          nodids = map (fingerVal st) nums
+                          nums = [1 .. (m $ st)]
+                      mapM_ f nodids
 -- }}}
 
 -- {{{ bootStrap
