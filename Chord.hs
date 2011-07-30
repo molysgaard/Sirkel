@@ -427,16 +427,16 @@ stabilize = do
                                   else do ptry (spawn succ (notify__closure (self st))) :: ProcessM (Either TransmitException ProcessId)
                                           stabilize
                          else do say "Successor is dead, restabilizing"
-                                 findSuccessor $ mod ((cNodeId . self $ st) + 1) (2^(m st))
+                                 findSuccessors $ mod ((cNodeId . self $ st) + 1) (2^(m st))
                                  stabilize
     Nothing -> stabilize
 -- }}}
 
--- {{{ findSuccessor
+-- {{{ findSuccessors
 -- | YOU are wordering who's the successor of a certain key, if you don't know yourself
 -- | you relay it forward with YOU as the original caller.
-findSuccessor :: Integer -> ProcessM [NodeId]
-findSuccessor key = do
+findSuccessors :: Integer -> ProcessM [NodeId]
+findSuccessors key = do
   st <- getState
   case (hasSuccessor st key) of
       (Has suc) -> return suc
@@ -447,9 +447,9 @@ findSuccessor key = do
           case recv == (self st) of
             False -> do ret <- remoteFindSuccessor recv key
                         case ret of 
-                          Nothing -> modifyState (removeFinger recv) >> findSuccessor key
+                          Nothing -> modifyState (removeFinger recv) >> findSuccessors key
                           Just succ -> return succ
-            True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessor key
+            True -> say "THIS IS WRONG, we should not be in our own fingertable! retrying" >> liftIO (threadDelay 5000000) >> findSuccessors key
 -- }}}
 
 -- {{{ remoteFindSuccessor

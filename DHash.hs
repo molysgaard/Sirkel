@@ -58,7 +58,7 @@ $( remotable [] )
 -- {{{ getBlock
 getBlock :: Integer -> ProcessM (Maybe BS.ByteString)
 getBlock key = do
-    succ <- findSuccessor key
+    succ <- findSuccessors key
     getBlock' key succ
 
 -- getBlock' gets a block from a node we know has it
@@ -86,7 +86,7 @@ getBlock' key (s:su) = do
 putBlock ::  BS.ByteString -> ProcessM (Integer, NodeId)
 putBlock bs = do
     let key = encBlock bs
-    succs <- findSuccessor key
+    succs <- findSuccessors key
     putBlock' bs key (head succs)
 
 -- | putBlock' put a block on a node we know
@@ -105,7 +105,7 @@ putBlock' bs key succ = do
 -- {{{ deleteBlock
 deleteBlock :: Integer -> ProcessM Bool
 deleteBlock key = do
-    succs <- findSuccessor key
+    succs <- findSuccessors key
     ret <- getBlockPid (head succs)
     case ret of
       Just blockPid -> do

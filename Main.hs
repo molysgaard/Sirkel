@@ -43,7 +43,7 @@ run str = do bootStrap initState str -- ^ Start the chord ring
              userInput -- ^ this is for debug, it's our window into whats happening ;)
 
 -- {{{ userInput
--- | debug function, reads a 0.[0-9] number from command line and runs findSuccessor on it in the DHT
+-- | debug function, reads a 0.[0-9] number from command line and runs findSuccessors on it in the DHT
 userInput :: ProcessM ()
 userInput = do line <- liftIO $ hGetLine stdin
                let x = 2^160 :: Integer
@@ -56,7 +56,7 @@ userInput = do line <- liftIO $ hGetLine stdin
                   "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) :: ProcessM (Maybe String)
                               say $ show resp
                   "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
-                              succ <- findSuccessor num
+                              succ <- findSuccessors num
                               say $ sh . fm . cNodeId . head $ succ
                   "del" -> do let num  = ((read (drop 4 line)) :: Integer)
                               succ <- deleteBlock num
@@ -87,7 +87,7 @@ randomFinds = do
   liftIO $ threadDelay 8000000 -- 8 sec
   st <- getState
   key <- liftIO $ randomRIO (1, 2^(m st)) :: ProcessM Integer
-  succ <- findSuccessor key
+  succ <- findSuccessors key
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double
       fm = fromRational . (% x)
