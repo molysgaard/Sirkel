@@ -213,8 +213,9 @@ addToSuccessorList :: NodeState -> NodeId -> [NodeId] -> [NodeId] -> FingerEntry
 addToSuccessorList st node prev [] = SuccessorList . (take (r st)) . nub $ (prev ++ [node])
   where nub = (map head) . List.group
 addToSuccessorList st node prev (cur:next)
-  | between (cNodeId node) (cNodeId . self $ st) (cNodeId cur) = SuccessorList $ prev ++ [node] ++ (take ((r st) - (length prev + 1)) next)
+  | between (cNodeId node) (cNodeId . self $ st) (cNodeId cur) = SuccessorList . (take (r st)) . nub $ prev ++ [node] ++ next
   | otherwise = addToSuccessorList st node (prev ++ [cur]) next
+  where nub = (map head) . List.group
 
 addFingers :: [NodeId] -> NodeState -> NodeState
 addFingers ns st = List.foldl' (\st n -> addFinger n st) st ns
@@ -306,7 +307,6 @@ getStatePid = do nid <- getSelfNode
 -- | else you relay the query forward
 relayFndSucc :: NodeId -> ProcessId -> Integer -> Int -> ProcessM ()
 relayFndSucc nid caller key howMany = do
-  say "Got relay"
   modifyState (\x -> addFinger (nodeFromPid caller) (addFinger nid x))
   st <- getState
   let x = 2^(m st) :: Integer
@@ -316,10 +316,8 @@ relayFndSucc nid caller key howMany = do
       sh = (take 5) . show
   case (hasSuccessor st key howMany) of
       (Has suc) -> do 
-             say $ "Sending answ to: " ++ (show caller)
              send caller suc -- we have the successor of the node
       HasNot -> do
-          say "Has not"
           let recv = last $ closestPreceding st key -- | find the next to relay to
           case recv == (self st) of
             False -> do
@@ -352,6 +350,7 @@ notify notifier = do
 ping pid = send pid pid
 -- }}}
 
+-- | debug function, not needed for Chord to function
 remoteSay str = say str
 
 $( remotable ['relayFndSucc, 'getPred, 'notify, 'ping, 'remoteSay] )
@@ -364,7 +363,7 @@ joinChord node = do
     say $ "Join on: " ++ (show node)
     succ <- liftM (head . fromJust) $ remoteFindSuccessor node (mod ((cNodeId . self $ st) + 1) (m $ st)) (r st)
     say $ "Ret self?: " ++ (show (succ == (self st))) ++ " Ret boot?: " ++ (show (succ == node))
-    --buildFingers succ
+    buildFingers succ
     sst <- getState
     --say $ "Finish join: " ++ (show . nils . fingerTable $ sst)
     let suc = successor sst
@@ -470,7 +469,6 @@ remoteFindSuccessor' _ _ _ 0 = return Nothing
 remoteFindSuccessor' node key howMany tries = do
   st <- getState
   selfPid <- getSelfPid
-  say $ "relayFndSucc on: " ++ (show node)
   ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer) (howMany :: Int)) :: ProcessM (Either TransmitException ProcessId)
   succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe [NodeId])
   case succ of
