@@ -37,7 +37,7 @@ import DHash
 main = remoteInit Nothing [Chord.__remoteCallMetaData, DHash.__remoteCallMetaData] run
 
 run str = do bootStrap initState str -- ^ Start the chord ring
-             --spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
+             spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
              ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
              spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
              userInput -- ^ this is for debug, it's our window into whats happening ;)
@@ -79,7 +79,7 @@ initState = NodeState {
         , predecessor = undefined
         , timeout = 10 -- ^ The timout latency of ping
         , m = 160 -- ^ The number of bits in a key, ususaly 160
-        , r = 2 -- ^ the number of successors
+        , r = 5 -- ^ the number of successors
         , b = 2 -- ^ the nuber of replicas
         , blockSize = 10 -- ^ the number of bytes a block is
         }
