@@ -470,6 +470,7 @@ remoteFindSuccessor' node key howMany tries = do
   st <- getState
   selfPid <- getSelfPid
   ptry $ spawn node (relayFndSucc__closure (self st) selfPid (key :: Integer) (howMany :: Int)) :: ProcessM (Either TransmitException ProcessId)
+  -- maybe it should be checked for errors in the ptry, if the error is local something will not work?
   succ <- receiveTimeout 10000000 [match (\x -> return x)] :: ProcessM (Maybe [NodeId])
   case succ of
     Nothing -> say "RemFndSucc timed out, retrying" >> remoteFindSuccessor' node (key :: Integer) (howMany :: Int) (tries - 1)

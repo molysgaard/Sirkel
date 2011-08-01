@@ -274,21 +274,21 @@ janitorSceduler = do
 -- | fix function that looks on one block in the HashTable
 -- and checks if ownership hash changed.
 fix :: NodeState -> (Integer, (Bool,BS.ByteString)) -> ProcessM (Integer, (Bool,BS.ByteString))
-fix st entry@(key, (True, bs)) = do
-   if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
-     then return entry
-     else do 
+fix st entry@(key, (True, bs))
+  | between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+  = return entry
+  | otherwise = do 
              say "we are no longer responsible for this block"
              putBlock bs
              return (key,(False,bs))
 
-fix st entry@(key, (False, bs)) = do
-   if between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
-     then do 
-             say "we are the new block owner"
-             mapM_  (putBlock' bs key) (successors st)
-             return (key,(True,bs))
-     else return entry
+fix st entry@(key, (False, bs))
+  | between key (cNodeId . predecessor $ st) (cNodeId . self $ st)
+  = do 
+      say "we are the new block owner"
+      mapM_  (putBlock' bs key) (successors st)
+      return (key,(True,bs))
+  | otherwise = return entry
 -- }}}
 
 -- {{{ chunkBs
@@ -308,10 +308,10 @@ putObject a = do st <- getState
 
 -- {{{ getObject
 getObject ::  (Binary a) => [Integer] -> Int -> ProcessM (Maybe a)
-getObject keys howMany = liftM (liftM decode) $ liftM test $ mapM (\k -> getBlock k howMany) keys
+getObject keys howMany = liftM (liftM decode) $ liftM maybeConcatBS $ mapM (\k -> getBlock k howMany) keys
 
-test ::  [Maybe BS.ByteString] -> Maybe BS.ByteString
-test blocks
+maybeConcatBS ::  [Maybe BS.ByteString] -> Maybe BS.ByteString
+maybeConcatBS blocks
   | any (== Nothing) blocks = Nothing
   | otherwise = Just . BS.concat . catMaybes $ blocks
 
