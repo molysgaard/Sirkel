@@ -37,15 +37,15 @@ In Main.hs there is a initState. The fields in this state determines how your DH
         , blockSize = 10 -- ^ the number of bytes a block is
         }
 
-`self` is a reference to ourselves and should be left undefined, it is populated when you initialize the DHT.
-`fingerTable` is our "address book". It tells us whom to ask what, and also who most likely to know what.
-`blockDir` is currently not used since blocks are stored in RAM
-`predecessor` is a reference to our predecessor in the Chord ring. It should be left empty for the same reason as self.
-`timeout` is not used yet but will be used to determine how long to way for a reply from the DHT.
-`m` is the number of bits that makes up the keyspace of the Chord ring. Note that it can not be changed without changing the hashing algorithm which is not supported yet.
-`r` is one of the most important parameters. It determines how many immediate successors you keep. This has consequences that we'll look on soon.
-`b` is the number of replicas of each block that should be kept, the node responsible for a block will make shure that its `b` successors has a copy of it's blocks so that in the event of node failure they can take over the role as owners of the block.
-`blockSize` is the numbers of bytes a block should have. When you try to put data, it will first be chunked into blocks of this size, then each block will be hashed and put separately.
+ * `self` is a reference to ourselves and should be left undefined, it is populated when you initialize the DHT.
+ * `fingerTable` is our "address book". It tells us whom to ask what, and also who most likely to know what.
+ * `blockDir` is currently not used since blocks are stored in RAM
+ * `predecessor` is a reference to our predecessor in the Chord ring. It should be left empty for the same reason as self.
+ * `timeout` is not used yet but will be used to determine how long to way for a reply from the DHT.
+ * `m` is the number of bits that makes up the keyspace of the Chord ring. Note that it can not be changed without changing the hashing algorithm which is not supported yet.
+ * `r` is one of the most important parameters. It determines how many immediate successors you keep. This has consequences that we'll look on soon.
+ * `b` is the number of replicas of each block that should be kept, the node responsible for a block will make shure that its `b` successors has a copy of it's blocks so that in the event of node failure they can take over the role as owners of the block.
+ * `blockSize` is the numbers of bytes a block should have. When you try to put data, it will first be chunked into blocks of this size, then each block will be hashed and put separately.
 
 Now, more on the `r` number. Each node keeps `r` successors.
 That means that if we are asked for the successor of a key that preceeds
@@ -69,6 +69,7 @@ of Sirkel nodes then all nodes know all others and there will be no network traf
 a query. This off-course comes to a price. You have to store the contact information about `r`
 nodes so for a million nodes network `r` must be kept at a reasonable level.
 
-For questions, send me an e-mail at morten@lysgaard.no
-[Projects webpage](mortenlysgaard.com)
-[Projects Github page](https://github.com/molysgaard/Sirkel)
+For questions or anything else:
+ * Send me an e-mail at morten@lysgaard.no
+ * [Projects webpage](mortenlysgaard.com)
+ * [Projects Github page](https://github.com/molysgaard/Sirkel)
