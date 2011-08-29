@@ -98,4 +98,3 @@ randomFinds = do
   --say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ)
   randomFinds
 -- }}}
-
