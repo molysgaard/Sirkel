@@ -1,11 +1,13 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
-module DHash where
+module Remote.DHT.DHash where
 
 --TODO A block is put on node A and replicated on node B.
 --     Then node B leaves.
 --     Then the next node in the ring, node C, does not recieve a replicate command.
 --     Only if node A leaves and there exits replicas will the replicas be correctly reinserted
 
+import Remote
+{--
 import Remote.Call
 import Remote.Channel
 import Remote.Peer
@@ -13,6 +15,7 @@ import Remote.Process
 import Remote.Init
 import Remote.Encoding
 import Remote.Reg
+--}
 
 import Control.Monad (liftM)
 import Data.Typeable
@@ -36,6 +39,7 @@ import Control.Monad.ST
 import Chord
 
 -- {{{ Block
+-- | 'Block' lets us send blocks back when somone asks for one.
 data Block = BlockError | BlockFound BS.ByteString deriving (Show, Typeable)
 instance Binary Block where
   put BlockError = put (0 :: Word8)
@@ -49,6 +53,8 @@ instance Binary Block where
 -- }}}
 
 -- {{{ encBlock
+-- | 'encBlock' takes a 'BS.ByteString' and returns the ID/key
+-- of that block. This is for 'BS.ByteString's what 'cNodeId' is for 'NodeId's
 encBlock :: BS.ByteString -> Integer 
 encBlock n = integerDigest . sha1 $ n
 -- }}}
@@ -56,12 +62,14 @@ encBlock n = integerDigest . sha1 $ n
 $( remotable [] )
 
 -- {{{ getBlock
+-- | 'getBlock' retrieves a block with a given ID/key.
 getBlock :: Integer -> Int -> ProcessM (Maybe BS.ByteString)
 getBlock key howMany = do
     succ <- findSuccessors key howMany
     getBlock' key howMany succ
 
 -- getBlock' gets a block from a node we know has it
+-- | internal function for 'getBlock'
 getBlock' :: Integer -> Int -> [NodeId] -> ProcessM (Maybe BS.ByteString)
 getBlock' _ _ [] = return Nothing
 getBlock' key howMany (s:su) = do
@@ -80,16 +88,18 @@ getBlock' key howMany (s:su) = do
       Nothing -> say "GetBlock timed out, retrying" >> liftIO (threadDelay 5000000) >> getBlock key howMany
 -- }}}
 
--- {{{ putBlock, puts a block, returns the successor of that block. You will
+-- {{{ putBlock
+-- | 'putBlock', puts a block, returns the successor of that block. You will
 -- also find the block replicated on the (r st) next nodes, but it is the node
--- responsible for the block that is responsible for delivering the block to them
+-- responsible for the block that is responsible for delivering the block to the
+-- replicators.
 putBlock ::  BS.ByteString -> ProcessM (Integer, NodeId)
 putBlock bs = do
     let key = encBlock bs
     succs <- findSuccessors key 1
     putBlock' bs key (head succs)
 
--- | putBlock' put a block on a node we know
+-- | 'putBlock'' put a block on a node we know
 putBlock' :: BS.ByteString -> Integer -> NodeId -> ProcessM (Integer, NodeId)
 putBlock' bs key succ = do
     ret <- getBlockPid succ
@@ -103,6 +113,10 @@ putBlock' bs key succ = do
 -- }}}
 
 -- {{{ deleteBlock
+-- | 'deleteBlock' takes the ID/key of the block to delete
+-- and sends a message to the node responsible for that block.
+-- The message then propagates from the responsible to the
+-- replicators.
 deleteBlock :: Integer -> ProcessM Bool
 deleteBlock key = do
     succs <- findSuccessors key 1
@@ -117,6 +131,7 @@ deleteBlock key = do
 -- }}}
 
 -- {{{ getBlockPid
+-- | 'getBlockPid' gets the 'ProcessId' for the 'initBlockStore' process.
 getBlockPid :: NodeId -> ProcessM (Maybe ProcessId)
 getBlockPid node = do 
                  statePid <- ptry $ nameQuery node "DHASH-BLOCK-STORE" :: ProcessM (Either ServiceException (Maybe ProcessId))
@@ -126,7 +141,7 @@ getBlockPid node = do
 -- }}}
 
 -- {{{ Datatypes
--- | Datatype encapsulating the things we can do with the HashTable
+-- | 'Dhash' is a datatype encapsulating the things we can do with the HashTable
 data DHash = Insert BS.ByteString | Lookup Integer ProcessId | Delete Integer | Janitor deriving (Eq, Show, Typeable)
 instance Binary DHash where
   put (Insert a) = do put (0 :: Word8)
@@ -148,6 +163,9 @@ instance Binary DHash where
                      return $ Delete key
              3 -> return Janitor
 
+-- | 'DHashTable' is the datastructure used to store all blocks.
+-- This is designed so that in the future we can extend it to 
+-- other storage systems, eg. filesystem.
 type DHashTable = HT.LinearHashTable Integer (Bool,BS.ByteString)
 -- }}}
 
@@ -198,6 +216,7 @@ initBlockStore ht' = do
 -- }}}
 
 -- {{{ lookupBlock
+-- | looks in the hashtable for the block and returns it if it finds it.
 lookupBlock :: Integer -> ProcessId -> DHashTable -> ProcessM DHashTable
 lookupBlock key pid ht = do answ <- liftIO $ HT.lookup ht key
                             spawnLocal (sendBlock answ pid)
@@ -205,6 +224,7 @@ lookupBlock key pid ht = do answ <- liftIO $ HT.lookup ht key
 -- }}}
 
 -- {{{ removeBlock
+-- | removes a block from the hash table if it exists there.
 removeBlock :: DHashTable -> Integer -> ProcessM DHashTable
 removeBlock ht key = do 
     st <- getState
@@ -222,6 +242,8 @@ removeBlock ht key = do
 -- }}}
 
 -- {{{ insertBlock
+-- | Inserts a block to the 'DHashTable'. It also checks if we
+-- are the node responsible for the block or just a replicator.
 insertBlock :: DHashTable -> BS.ByteString -> ProcessM DHashTable
 insertBlock ht val = do 
   st <- getState
@@ -256,7 +278,8 @@ janitor ht = do ns <- liftIO $ HT.toList ht
 
 -- {{{ janitorSceduler
 -- | janitorSceduler is a process that periodically sends a "janitor"
--- message to the block manager, this because we don't have MVar etc.
+-- message to the block manager, this because we don't have MVars in
+-- CloudHaskell
 janitorSceduler :: ProcessM ()
 janitorSceduler = do
          self <- getSelfNode
@@ -292,6 +315,8 @@ fix st entry@(key, (False, bs))
 -- }}}
 
 -- {{{ chunkBs
+-- | 'chunkBs' splits a 'BS.ByteString' into parts that
+-- each has the size of 'blockSize' bytes or less.
 chunkBs ::  NodeState -> BS.ByteString -> [BS.ByteString]
 chunkBs st bs
   | BS.null bs = []
@@ -300,6 +325,14 @@ chunkBs st bs
 -- }}}
 
 -- {{{ putObject
+-- | 'putObject' is the main function of the DHash module.
+-- It lets you put an arbitrary object that an instance of
+-- Binary into the DHT. To retrieve it again, you'll have to call
+-- 'getObject' with the list of IDs/keys that this function returns.
+-- NB: The order of the IDs/keys matters. This is because an object is
+-- chunked. Then each chunk is stored seperatly. When one calls 'getObject'
+-- the blocks retrieved is concated in the order of the IDs/keys. 
+-- That means you'll get garbage if you mess up the order.
 putObject ::  (Binary a) => a -> ProcessM [(Integer, NodeId)]
 putObject a = do st <- getState
                  let bs = (chunkBs st) . encode $ a
@@ -307,9 +340,18 @@ putObject a = do st <- getState
 -- }}}
 
 -- {{{ getObject
+-- | 'getObject' takes a list of IDs/keys that represent an object that's
+-- already been put with 'putObject'.
+-- NB: The order of the IDs/keys matters. This is because an object is
+-- chunked. Then each chunk is stored seperatly. When one calls 'getObject'
+-- the blocks retrieved is concated in the order of the IDs/keys. 
+-- That means you'll get garbage if you mess up the order.
 getObject ::  (Binary a) => [Integer] -> Int -> ProcessM (Maybe a)
 getObject keys howMany = liftM (liftM decode) $ liftM maybeConcatBS $ mapM (\k -> getBlock k howMany) keys
 
+-- | 'maybeConcatBS' takes '[Maybe BS.ByteString]'s and concats
+-- all the bytestrings into one if none of them are Nothing.
+-- Else it returns Nothing
 maybeConcatBS ::  [Maybe BS.ByteString] -> Maybe BS.ByteString
 maybeConcatBS blocks
   | any (== Nothing) blocks = Nothing
