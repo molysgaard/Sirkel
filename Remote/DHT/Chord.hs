@@ -1,5 +1,22 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
-module Remote.DHT.Chord where
+module Remote.DHT.Chord (
+                        -- * Types
+                        NodeId, 
+                        NodeState(..),
+                        FingerTable,
+                        -- * Initialization
+                        bootstrap,
+                        -- * Lookup
+                        findSuccessors,
+                        successors,
+                        successor,
+                        -- * State
+                        getState,
+                        -- * Utility
+                        between, cNodeId,
+                        -- * Cloud haskell specific
+                        __remoteCallMetaData
+                        ) where
 
 -- {{{ imports
 import Remote
@@ -43,8 +60,8 @@ type FingerTable = Map.Map Integer FingerEntry
 data NodeState = NodeState {
           self :: NodeId
         , fingerTable :: FingerTable -- ^ The fingerTable
-        , blockDir :: FilePath -- ^ The dir to store the blocks
-        , predecessor :: NodeId
+        , blockDir :: FilePath -- ^ The dir to store the blocks, not currently used since everything is stored in a HashTable in memory
+        , predecessor :: NodeId -- ^ The node directly before us in the ring
         , timeout :: Int -- ^ The timout latency of ping
         , m :: Integer -- ^ The number of bits in a key, ususaly 160
         , r :: Int -- ^ The number of in the successor list, eg. 16
@@ -162,7 +179,9 @@ lookopAndIf k m f
 -- }}}
 
 -- {{{ between
--- | is n in the domain of (a, b) ?
+-- | Is n in the domain of (a, b) ?
+--
+--
 -- NB: This domain is closed. It's the same as
 -- a < n < b just it's circular as Chords keyspace.
 between :: Integer -> Integer -> Integer -> Bool
@@ -313,7 +332,7 @@ relayFndSucc nid caller key howMany = do
       (Has suc) -> do 
              send caller suc -- we have the successor of the node
       HasNot -> do
-          let recv = last $ closestPreceding st key -- | find the next to relay to
+          let recv = last $ closestPreceding st key -- find the next to relay to
           case recv == (self st) of
             False -> do
               let clos = $( mkClosureRec 'relayFndSucc )
@@ -453,8 +472,8 @@ findSuccessors key howMany = do
       (Has suc) -> return suc
       Empty -> return [self st]
       HasNot -> do
-          selfPid <- getSelfPid -- ^ get your pid
-          let recv = last $ closestPreceding st key -- | find the next to relay to
+          selfPid <- getSelfPid
+          let recv = last $ closestPreceding st key
           case recv == (self st) of
             False -> do ret <- remoteFindSuccessor recv key howMany
                         case ret of 
@@ -499,12 +518,12 @@ buildFingers buildNode = do
 -- }}}
 
 -- {{{ bootstrap
--- |'bootstrap' is designed to start a Chord Node.
--- It takes the initial state, lookups other Chord-nodes
+-- | Starts a Chord Node. It takes the initial state,
+-- lookups other Chord-nodes
 -- on the LAN, starts state handeling, stabilizing etc.
 -- in the background and then runs 'joinChord' on the first
 -- and best node that's altready a member in the ring.
-bootstrap st _ = do
+bootstrap st = do
   selfN <- getSelfNode
   let st' = st { self = selfN, predecessor = selfN }
   peers <- getPeers

@@ -1,5 +1,16 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
-module Remote.DHT.DHash where
+module Remote.DHT.DHash (
+                        -- * Initialization
+                        initBlockStore,
+                        -- * Put/Get/Delete
+                        putObject,
+                        getObject,
+                        deleteBlock,
+                        -- * Utility
+                        encBlock,
+                        -- * Cloud haskell specific
+                        Remote.DHT.DHash.__remoteCallMetaData
+                        ) where
 
 --TODO A block is put on node A and replicated on node B.
 --     Then node B leaves.
@@ -7,11 +18,11 @@ module Remote.DHT.DHash where
 --     Only if node A leaves and there exits replicas will the replicas be correctly reinserted
 
 import Remote
+import Remote.Process
 {--
 import Remote.Call
 import Remote.Channel
 import Remote.Peer
-import Remote.Process
 import Remote.Init
 import Remote.Encoding
 import Remote.Reg
@@ -36,7 +47,7 @@ import qualified Data.ByteString.Lazy.Char8 as BS
 import qualified Data.HashTable.IO as HT
 import Control.Monad.ST
 
-import Chord
+import Remote.DHT.Chord
 
 -- {{{ Block
 -- | 'Block' lets us send blocks back when somone asks for one.
