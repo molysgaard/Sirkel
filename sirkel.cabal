@@ -1,8 +1,9 @@
 Name:                sirkel
 Version:             0.1
-Cabal-Version:       >=1.2
+Cabal-Version:       >=1.6
 Description:         An implementation of the Chord DHT with replication and faulth tolerance
 synopsis:            Sirkel, a Chord DHT
+Category:            Distributed Computing,Concurrency,Concurrent,Data Structures,Database
 License:             BSD3
 License-file:        LICENSE
 Extra-Source-Files:  README.md
@@ -13,8 +14,11 @@ Build-Type:          Simple
 tested-with:         GHC == 6.12.3
 
 library
-  Build-Depends:       base >= 4, haskell98, random, bytestring, binary, containers, transformers, hashtables, remote, SHA
+  Build-Depends:       base >= 4 && < 5, haskell98, random, bytestring, binary, containers, transformers, hashtables, remote, SHA
   ghc-options:         -Wall
   Extensions:          TemplateHaskell, DeriveDataTypeable
   Exposed-Modules:     Remote.DHT.Chord, Remote.DHT.DHash
 
+source-repository head
+  type: git
+  location: git://github.com/molysgaard/Sirkel.git
