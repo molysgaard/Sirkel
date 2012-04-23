@@ -23,12 +23,12 @@ import Data.List (foldl')
 import Data.Digest.Pure.SHA
 import Data.Binary
 import qualified Data.ByteString.Lazy.Char8 as BS
-import IO
+import System.IO (hGetLine, stdin)
 -- for helper/debug
 import qualified Data.List as List
 import System.Random (randomRIO)
 import Data.Ratio
-import Maybe (fromJust)
+import Data.Maybe (fromJust)
 
 import qualified Data.HashTable.IO as HT
 

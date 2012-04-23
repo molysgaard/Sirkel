@@ -35,7 +35,7 @@ import qualified Data.Map as Map
 import qualified Data.List as List
 import qualified Data.ByteString.Lazy.Char8 as BS
 
-import Maybe (fromJust)
+import Data.Maybe (fromJust)
 import Data.Int (Int64)
 -- }}}
 
