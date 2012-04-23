@@ -1,50 +1,43 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
-module Chord where
-
--- | TODO
--- When a node never responds, it should be removed from the fingertable, maybe actively replaced?
---
--- When a node joins, it very often get it self as it's successor, that's _never_ correct for joins, only lookups to keys, think this has been fixed
---
--- When a node joins, it makes 160 _sequenced_ lookups, these are to discover what nodes are on the net.
--- If the lookup times out, it's going to take 160*timeout for it to complete and leave 160 "Timeout" messages
--- in the logs
---
+module Remote.DHT.Chord (
+                        -- * Types
+                        NodeId, 
+                        NodeState(..),
+                        FingerTable,
+                        -- * Initialization
+                        bootstrap,
+                        -- * Lookup
+                        findSuccessors,
+                        successors,
+                        successor,
+                        -- * State
+                        getState,
+                        -- * Utility
+                        between, cNodeId,
+                        -- * Cloud haskell specific
+                        __remoteCallMetaData
+                        ) where
 
 -- {{{ imports
-import Remote.Call
-import Remote.Channel
-import Remote.Peer
+import Remote
 import Remote.Process
-import Remote.Init
-import Remote.Encoding
-import Remote.Reg
+import Remote.Call
 
-import Control.Monad (liftM)
 import Data.Typeable
-import Control.Monad.IO.Class (liftIO)
+import Data.Binary
+import Data.Digest.Pure.SHA
 
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad (liftM)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.MVar
-import qualified Control.Exception as Ex
 
 import qualified Data.Map as Map
-import Data.List (foldl')
-
-import Data.Digest.Pure.SHA
-import Data.Binary
+import qualified Data.List as List
 import qualified Data.ByteString.Lazy.Char8 as BS
 
-import Data.Int
-
-import IO
+import Data.Maybe (fromJust)
+import Data.Int (Int64)
 -- }}}
-
--- for helper debug
-import qualified Data.List as List
-import System.Random (randomRIO)
-import Data.Ratio
-import Maybe (fromJust)
 
 --{{{ Data type and type class definitions
 
@@ -63,12 +56,12 @@ instance Binary FingerEntry where
 
 type FingerTable = Map.Map Integer FingerEntry
 
--- | NodeState, carries all important state variables
+-- | NodeState, carries all important state for a Chord DHT to function
 data NodeState = NodeState {
           self :: NodeId
         , fingerTable :: FingerTable -- ^ The fingerTable
-        , blockDir :: FilePath -- ^ The dir to store the blocks
-        , predecessor :: NodeId
+        , blockDir :: FilePath -- ^ The dir to store the blocks, not currently used since everything is stored in a HashTable in memory
+        , predecessor :: NodeId -- ^ The node directly before us in the ring
         , timeout :: Int -- ^ The timout latency of ping
         , m :: Integer -- ^ The number of bits in a key, ususaly 160
         , r :: Int -- ^ The number of in the successor list, eg. 16
@@ -97,11 +90,17 @@ instance Binary NodeState where
            blockSize <- get
            return (NodeState { self = se, fingerTable = ft, blockDir = bd, predecessor = pr, timeout = ti, m=m, r=r, b=b, blockSize=blockSize })
 
+-- | 'successor' takes the state and tells us who our imidiate
+-- successor is.
 successor :: NodeState -> Maybe NodeId
 successor st
   | null (successors st) = Nothing --error "No successors"
   | otherwise = Just . head . successors $ st
 
+-- | 'successors' takes the state and tells us who
+-- our 'r' imidiate successors are in rising order.
+-- That is, node number 1 is the closest and node n
+-- is the successor farthes away.
 successors :: NodeState -> [NodeId]
 successors st
   | Just (SuccessorList ns) <- Map.lookup 1 (fingerTable st)
@@ -109,6 +108,8 @@ successors st
   = ns
   | otherwise = []
 
+-- | 'cNodeId' takes a 'NodeId' and return the SHA1 hash
+-- of it. This is the ID/key of the NodeId.
 cNodeId :: NodeId -> Integer
 cNodeId n = integerDigest . sha1 $ encode n
 
@@ -117,7 +118,7 @@ data FingerResults = Has [NodeId] | HasNot | Empty
 
 -- {{{ algorithmic stuff
 -- {{{ hasSuccessor
--- | Shuld return the successor of US if the key asked for is in the domain (us, successor]
+-- | 'hasSuccessor' tells us if we have the successors of a given key.
 hasSuccessor :: NodeState -> Integer -> Int -> FingerResults
 hasSuccessor st key howMany
   | List.null ss = Empty
@@ -137,6 +138,8 @@ hasSuccessor' st key howMany succ@(s:ss)
 -- }}}
 
 -- {{{ closestPrecedingNode
+-- | 'closestPreceding' is the node that has the 'NodeId' closest to the given key,
+-- /but/ not above it that we know of in our 'NodeState'.
 closestPreceding :: NodeState -> Integer -> [NodeId]
 closestPreceding st key = closestPreceding' st (fingerTable st) key (m st) []
 
@@ -176,7 +179,11 @@ lookopAndIf k m f
 -- }}}
 
 -- {{{ between
--- | is n in the domain of (a, b) ?
+-- | Is n in the domain of (a, b) ?
+--
+--
+-- NB: This domain is closed. It's the same as
+-- a < n < b just it's circular as Chords keyspace.
 between :: Integer -> Integer -> Integer -> Bool
 between n a b
   | a == b = n /= a --error "n can't be between a and b when a == b" -- can't be alike
@@ -185,11 +192,12 @@ between n a b
 -- }}}
 
 -- {{{ addFinger
--- | Adds a finger to the fingertable. If there already exists a finger they are compared to see who's the best fit.
+-- | Adds a finger to the fingertable. If there already exists a
+-- finger they are compared to see who's the best fit.
 addFinger :: NodeId -> NodeState -> NodeState
 addFinger newFinger st 
   | newFinger == (self st) = st
-  | otherwise = st {fingerTable = foldl' pred (fingerTable st) [1..(m st)]}
+  | otherwise = st {fingerTable = List.foldl' pred (fingerTable st) [1..(m st)]}
     where pred :: FingerTable -> Integer -> FingerTable
           pred ft 1
             | Just (SuccessorList ns) <- Map.lookup 1 ft
@@ -225,6 +233,9 @@ fingerVal st k = mod ((cNodeId . self $ st) + 2^(k-1)) (2^(m st))
 -- }}}
 
 -- {{{ removeFinger
+-- 'removeFinger' takes a 'NodeId' and a 'NodeState' and removes all
+-- occurences of it in the 'NodeState'. This is used when a node
+-- leaves or times out.
 removeFinger :: NodeId -> NodeState -> NodeState
 removeFinger node st
   | node == (self st) = st
@@ -238,6 +249,8 @@ removeFinger node st
 -- }}}
 
 -- {{{ State stuff
+-- | 'PassState' let's us pass state around between the
+-- 'handleState' process and all the others.
 data PassState = ReadState ProcessId
                | RetReadState NodeState
                | TakeState ProcessId
@@ -275,6 +288,8 @@ instance Binary PassState where
                i <- get
                return (PutState i)
 
+-- | 'getState' lets us retrive the current state from the
+-- 'handleState' process.
 getState :: ProcessM NodeState
 getState = do statePid <- getStatePid
               pid <- getSelfPid
@@ -284,6 +299,8 @@ getState = do statePid <- getStatePid
                 Nothing -> say "asked for state but state process did not return within timeout, retrying" >> getState
                 Just st -> return st
 
+-- | 'modifyState' takes a 'NodeState'-modifying function and
+-- runs it on the current state updating it.
 modifyState :: (NodeState -> NodeState) -> ProcessM NodeState
 modifyState f = do
                  statePid <- getStatePid
@@ -294,6 +311,7 @@ modifyState f = do
                    Nothing -> say "asked for modify, timeout, retrying" >> liftIO (threadDelay 50000000) >> modifyState f
                    Just st -> send statePid (PutState (f st)) >> return (f st)
 
+-- | 'getStatePid' gives us the 'ProcessId' of the 'handleState' process.
 getStatePid :: ProcessM ProcessId
 getStatePid = do nid <- getSelfNode
                  statePid <- nameQuery nid "CHORD-NODE-STATE"
@@ -303,22 +321,18 @@ getStatePid = do nid <- getSelfNode
 -- }}}
 
 -- {{{ relayFndSucc
--- | someone asks you for a successor, if you know it you reply to the original caller,
--- | else you relay the query forward
+-- | internal function: 'relayFndSucc' is called when a node does not know
+-- the answer to a 'findSuccessors' call. For each call, we halve
+-- the distance to the answer.
 relayFndSucc :: NodeId -> ProcessId -> Integer -> Int -> ProcessM ()
 relayFndSucc nid caller key howMany = do
   modifyState (\x -> addFinger (nodeFromPid caller) (addFinger nid x))
   st <- getState
-  let x = 2^(m st) :: Integer
-      fm :: Integer -> Double
-      fm = fromRational . (% x)
-      sh :: Integer -> String
-      sh = (take 5) . show
   case (hasSuccessor st key howMany) of
       (Has suc) -> do 
              send caller suc -- we have the successor of the node
       HasNot -> do
-          let recv = last $ closestPreceding st key -- | find the next to relay to
+          let recv = last $ closestPreceding st key -- find the next to relay to
           case recv == (self st) of
             False -> do
               let clos = $( mkClosureRec 'relayFndSucc )
@@ -338,6 +352,7 @@ getPred = do st <- getState
 
 -- {{{ notify
 -- | notifier is telling you he thinks he is your predecessor, check if it's true.
+-- and update the 'NodeState' accordingly.
 notify :: NodeId -> ProcessM ()
 notify notifier = do
   st <- getState
@@ -350,13 +365,15 @@ notify notifier = do
 ping pid = send pid pid
 -- }}}
 
--- | debug function, not needed for Chord to function
+-- | debug function, makes a remote node say a string.
 remoteSay str = say str
 
 $( remotable ['relayFndSucc, 'getPred, 'notify, 'ping, 'remoteSay] )
 
 -- {{{ joinChord
 -- | Joins a chord ring. Takes the id of a known node to bootstrap from.
+-- This is not the function you would use to start a Chord Node, for that
+-- use 'bootstrap'.
 joinChord :: NodeId -> ProcessM ()
 joinChord node = do
     st <- modifyState (addFinger node)
@@ -373,11 +390,9 @@ joinChord node = do
       Nothing -> say "joining got us no successor!" >> return ()
 -- }}}
 
--- this is a debug function with a bogus name
---nils :: Map.Map Integer NodeId -> [NodeId]
---nils = (List.map (\x -> head x)) . List.group . List.sort . Map.elems -- TODO this is a debug function
-
 -- {{{ checkAlive
+-- | 'checkAlive' checks if a single node is alive, if it's
+-- not we'll discard it from our 'fingerTable'.
 checkAlive node = do pid <- getSelfPid
                      flag <- ptry $ spawn node (ping__closure pid) :: ProcessM (Either TransmitException ProcessId)
                      case flag of
@@ -390,8 +405,9 @@ checkAlive node = do pid <- getSelfPid
                                        Just pid -> return True
 -- }}}
 
--- | Extracts all the nodes known to us from our state
 -- {{{ fingerNodes
+-- | Utility function that takes a 'NodeState' and
+-- returns all the 'NodeId's that we know
 fingerNodes :: NodeState -> [NodeId]
 fingerNodes st
   | Just (SuccessorList sl) <- Map.lookup 1 (fingerTable st)
@@ -403,6 +419,8 @@ fingerNodes st
 -- }}}
 
 -- {{{ checkFingerTable
+-- | 'checkFingerTable' checks if the nodes in our 'fingerTable' is alive
+-- and discards them if they're not
 checkFingerTable :: ProcessM ()
 checkFingerTable = do st <- getState
                       sequence $ List.map checkAlive (fingerNodes st)
@@ -410,6 +428,7 @@ checkFingerTable = do st <- getState
 -- }}}
 
 -- {{{ checkPred
+-- | 'checkPred' checks if our 'predecessor' is alive.
 checkPred :: ProcessM Bool
 checkPred = do st <- getState
                flag <- checkAlive (predecessor st)
@@ -420,6 +439,8 @@ checkPred = do st <- getState
 
 -- {{{ stabilize
 -- | This is run periodically to check if our fingertable is correct
+-- It is the one that handles node failures, leaves and joins.
+-- It's an internal function
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
   checkPred 
@@ -442,8 +463,8 @@ stabilize = do
 -- }}}
 
 -- {{{ findSuccessors
--- | YOU are wordering who's the successor of a certain key, if you don't know yourself
--- | you relay it forward with YOU as the original caller.
+-- | This is the main function of the Chord DHT. It lets you lookup
+-- what 'NodeId's has the responsebility for the given key
 findSuccessors :: Integer -> Int -> ProcessM [NodeId]
 findSuccessors key howMany = do
   st <- getState
@@ -451,8 +472,8 @@ findSuccessors key howMany = do
       (Has suc) -> return suc
       Empty -> return [self st]
       HasNot -> do
-          selfPid <- getSelfPid -- ^ get your pid
-          let recv = last $ closestPreceding st key -- | find the next to relay to
+          selfPid <- getSelfPid
+          let recv = last $ closestPreceding st key
           case recv == (self st) of
             False -> do ret <- remoteFindSuccessor recv key howMany
                         case ret of 
@@ -462,6 +483,8 @@ findSuccessors key howMany = do
 -- }}}
 
 -- {{{ remoteFindSuccessor
+-- | 'remoteFindSuccessor' takes a 'NodeId' the key to lookup and a number of how
+-- many successors to get.
 remoteFindSuccessor :: NodeId -> Integer -> Int -> ProcessM (Maybe [NodeId])
 remoteFindSuccessor node key howMany = remoteFindSuccessor' node key howMany 2
 remoteFindSuccessor' :: NodeId -> Integer -> Int -> Int -> ProcessM (Maybe [NodeId])
@@ -480,6 +503,8 @@ remoteFindSuccessor' node key howMany tries = do
 -- }}}
 
 -- {{{ buildFingers
+-- |'buildFingers' takes a 'NodeId' and does a lookup
+-- for sucessors to each index in our fingertable
 buildFingers :: NodeId -> ProcessM ()
 buildFingers buildNode = do
                       say $ "buildNode is: " ++ (show buildNode)
@@ -492,8 +517,13 @@ buildFingers buildNode = do
                       mapM_ f nodids
 -- }}}
 
--- {{{ bootStrap
-bootStrap st _ = do
+-- {{{ bootstrap
+-- | Starts a Chord Node. It takes the initial state,
+-- lookups other Chord-nodes
+-- on the LAN, starts state handeling, stabilizing etc.
+-- in the background and then runs 'joinChord' on the first
+-- and best node that's altready a member in the ring.
+bootstrap st = do
   selfN <- getSelfNode
   let st' = st { self = selfN, predecessor = selfN }
   peers <- getPeers
@@ -509,7 +539,7 @@ bootStrap st _ = do
 -- }}}
 
 -- {{{ handleState
--- | handlet get and puts for the state
+-- | This is an internal function, it handles gets and puts for the state
 -- this function is butt ugly and needs some hefty sugar
 handleState st' = do
   nameSet "CHORD-NODE-STATE"

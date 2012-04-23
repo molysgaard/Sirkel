@@ -23,20 +23,21 @@ import Data.List (foldl')
 import Data.Digest.Pure.SHA
 import Data.Binary
 import qualified Data.ByteString.Lazy.Char8 as BS
-import IO
--- for helper debug
+import System.IO (hGetLine, stdin)
+-- for helper/debug
 import qualified Data.List as List
 import System.Random (randomRIO)
 import Data.Ratio
-import Maybe (fromJust)
+import Data.Maybe (fromJust)
 
 import qualified Data.HashTable.IO as HT
 
-import Chord
-import DHash
-main = remoteInit Nothing [Chord.__remoteCallMetaData, DHash.__remoteCallMetaData] run
+import Remote.DHT.Chord
+import Remote.DHT.DHash
 
-run str = do bootStrap initState str -- ^ Start the chord ring
+main = remoteInit Nothing [Remote.DHT.Chord.__remoteCallMetaData, Remote.DHT.DHash.__remoteCallMetaData] run
+
+run _ =   do bootstrap initState -- ^ Start the chord ring
              spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
              ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
              spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
@@ -56,12 +57,12 @@ userInput = do line <- liftIO $ hGetLine stdin
                               say . show . (map fst) $ holder
                   "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) (r st) :: ProcessM (Maybe String)
                               say $ show resp
-                  "fnd" -> do let num  = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
+                  "fnd" -> do let num = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
                               tmp_howMany <- liftIO $ hGetLine stdin
                               let howMany = read tmp_howMany :: Int
                               succ <- findSuccessors num howMany
                               say $ show . (map (fm . cNodeId)) $ succ
-                  "del" -> do let num  = ((read (drop 4 line)) :: Integer)
+                  "del" -> do let num = ((read (drop 4 line)) :: Integer)
                               succ <- deleteBlock num
                               say $ "Trying to delete: " ++ (show num)
                   "sta" -> do st <- getState
