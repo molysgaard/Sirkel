@@ -1,13 +1,12 @@
 {-# LANGUAGE TemplateHaskell,BangPatterns,PatternGuards,DeriveDataTypeable #-}
 module Main where
 
-import Remote.Call
-import Remote.Channel
-import Remote.Peer
-import Remote.Process
-import Remote.Init
-import Remote.Encoding
-import Remote.Reg
+import Control.Distributed.Process
+import Control.Distributed.Process.Platform.Call
+import Control.Distributed.Process.Platform.Async
+import Control.Distributed.Process.Closure
+import Control.Distributed.Process.Node -- (initRemoteTable)
+import Network.Transport.TCP
 
 import Control.Monad (liftM)
 import Data.Typeable
@@ -32,20 +31,26 @@ import Data.Maybe (fromJust)
 
 import qualified Data.HashTable.IO as HT
 
-import Remote.DHT.Chord
-import Remote.DHT.DHash
+import qualified Control.Distributed.Process.DHT.Chord as Chord
+import qualified Control.Distributed.Process.DHT.DHash as DHash
 
-main = remoteInit Nothing [Remote.DHT.Chord.__remoteCallMetaData, Remote.DHT.DHash.__remoteCallMetaData] run
+import Control.Distributed.Process.DHT.Chord
+import Control.Distributed.Process.DHT.DHash
 
-run _ =   do bootstrap initState -- ^ Start the chord ring
-             spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
-             ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
-             spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
-             userInput -- ^ this is for debug, it's our window into whats happening ;)
+main = do
+    Right transport <- createTransport "127.0.0.1" "8080" defaultTCPParameters
+    let rtable = Chord.__remoteTable . Chord.__remoteTableDecl $ initRemoteTable
+    node <- newLocalNode transport rtable
+    runProcess node $ do
+      bootstrap initState node -- ^ Start the chord ring
+      spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
+      ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
+      spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
+      userInput -- ^ this is for debug, it's our window into whats happening ;)
 
 -- {{{ userInput
 -- | debug function, reads a 0.[0-9] number from command line and runs findSuccessors on it in the DHT
-userInput :: ProcessM ()
+userInput :: Process ()
 userInput = do line <- liftIO $ hGetLine stdin
                st <- getState
                let x = 2^160 :: Integer
@@ -55,12 +60,12 @@ userInput = do line <- liftIO $ hGetLine stdin
                case (take 3 line) of
                   "put" -> do holder <- putObject (drop 4 line)
                               say . show . (map fst) $ holder
-                  "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) (r st) :: ProcessM (Maybe String)
+                  "get" -> do resp <- getObject ((read (drop 4 line)) :: [Integer]) (r st) :: Process (Maybe String)
                               say $ show resp
                   "fnd" -> do let num = truncate ((read (drop 4 line)) * (fromInteger x)) :: Integer
                               tmp_howMany <- liftIO $ hGetLine stdin
                               let howMany = read tmp_howMany :: Int
-                              succ <- findSuccessors num howMany
+                              succ <- Chord.findSuccessors num howMany
                               say $ show . (map (fm . cNodeId)) $ succ
                   "del" -> do let num = ((read (drop 4 line)) :: Integer)
                               succ <- deleteBlock num
@@ -73,7 +78,7 @@ userInput = do line <- liftIO $ hGetLine stdin
                userInput
 -- }}}
 
-initState = NodeState {
+initState = Chord.NodeState {
           self = undefined
         , fingerTable = Map.empty -- ^ The fingerTable
         , blockDir = "/tmp/"
@@ -90,7 +95,7 @@ initState = NodeState {
 randomFinds = do
   liftIO $ threadDelay 8000000 -- 8 sec
   st <- getState
-  key <- liftIO $ randomRIO (1, 2^(m st)) :: ProcessM Integer
+  key <- liftIO $ randomRIO (1, 2^(m st)) :: Process Integer
   succ <- findSuccessors key (r st)
   let x = 2^(m $ st) :: Integer
       fm :: Integer -> Double

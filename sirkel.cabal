@@ -1,5 +1,5 @@
 Name:                sirkel
-Version:             0.1
+Version:             0.2
 Cabal-Version:       >=1.8
 Description:         An implementation of the Chord DHT with replication and faulth tolerance
 synopsis:            Sirkel, a Chord DHT
@@ -8,20 +8,47 @@ License:             BSD3
 License-file:        LICENSE
 Extra-Source-Files:  README.md
 Author:              Morten Olsen Lysgaard <morten@lysgaard.no>
-Maintainer:          Morten Olsen Lysgaard <morten@lysgaard.no>
+Maintainer:          Morten Olsen Lysgaard <morten@lysgaard.no> , Rob Stewart <robstewart57@gmail.com>
 Stability:           Experimental
 Build-Type:          Simple
-tested-with:         GHC == 6.12.3
+tested-with:         GHC == 7.6.1
 
 library
-  Build-Depends:       base >= 4 && < 5, random, bytestring, binary, containers, transformers, hashtables, remote, SHA
-  ghc-options:         -Wall
-  Extensions:          TemplateHaskell, DeriveDataTypeable
-  Exposed-Modules:     Remote.DHT.Chord, Remote.DHT.DHash
+  Build-Depends:     base >= 4.6.0.0 && < 5,
+                     binary >= 0.6.4.0 && < 0.8,
+                     bytestring,
+                     containers,
+                     distributed-process,
+                     distributed-process-platform,
+                     distributed-process-p2p,
+                     hashtables,
+                     network-transport,
+                     random,
+                     SHA,
+                     transformers
+  ghc-options:       -Wall
+  Extensions:        DeriveDataTypeable,
+                     ScopedTypeVariables,
+                     TemplateHaskell
+  Exposed-Modules:   Control.Distributed.Process.DHT.Chord,
+                     Control.Distributed.Process.DHT.DHash
+  hs-source-dirs:    src
 
 Executable TestClient
   Main-is:           TestClient.hs
-  Build-Depends:     base, sirkel, remote, bytestring, random, containers, transformers, SHA, binary, hashtables
+  Build-Depends:     base >= 4.6.0.0 && < 5,
+                     binary >= 0.6.4.0 && < 0.8,
+                     bytestring,
+                     containers,
+                     distributed-process,
+                     distributed-process-platform,
+                     hashtables,
+                     network-transport-tcp,
+                     random,
+                     SHA,
+                     sirkel,
+                     transformers
+  hs-source-dirs:    examples
 
 source-repository head
   type: git
