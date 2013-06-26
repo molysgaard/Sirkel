@@ -277,25 +277,23 @@ remotableDecl [
           void $ modifyState (addFinger (processNodeId caller) . addFinger nid)
           st <- getState
           case (hasSuccessor st key howMany) of
-              (Has suc) -> do
-                     send caller suc -- we have the successor of the node
+              (Has suc) -> send caller suc -- we have the successor of the node
               HasNot -> do
                   let recv = last $ closestPreceding st key -- find the next to relay to
                   if (recv == (self st))
                     then do
+                      say "THIS IS WRONG!" -- this should never happen because we should not be in the fingertable
+                      send caller (self st)
+                    else do
                       -- let clos = $( mkClosure 'relayFndSucc )
                       void $ spawn recv ($(mkClosure 'relayFndSucc) ((self st),caller,key,howMany))
-                      {-
+                      {- TODO
                       flag <- try $ spawn recv (clos (self st) caller key howMany) :: Process (Either TransmitException ProcessId)
                       case flag of
                         Left _ -> say "could not spawn" >> modifyState (removeFinger recv) >> relayFndSucc nid caller key howMany -- spawning failed
                         Right _ -> return ()
                       -}
-                    else do
-                      say "THIS IS WRONG!" -- this should never happen because we should not be in the fingertable
-                      send caller (self st)
-              Empty -> do
-                     send caller (self st)
+              Empty -> send caller (self st)
       |]
   ]
 
@@ -321,16 +319,17 @@ joinChord node = do
 -- not we'll discard it from our 'fingerTable'.
 checkAlive node = return True
 {- TODO: re-write.
-checkAlive node = do pid <- getSelfPid
-                     flag <- try $ spawn node ($(mkClosure 'ping) pid) -- :: Process (Either TransmitException ProcessId)
-                     case flag of
-                       Left _ -> say "dropped node" >> modifyState (removeFinger node) >> return False
-                       Right _ -> do resp <- receiveTimeout 10000000 [match (\x -> return x)] :: Process (Maybe ProcessId)
-                                     case resp of
-                                       Nothing -> do modifyState (removeFinger node)
-                                                     say "dropped node"
-                                                     return False
-                                       Just pid -> return True
+checkAlive node = do
+    pid <- getSelfPid
+    flag <- try $ spawn node ($(mkClosure 'ping) pid) -- :: Process (Either TransmitException ProcessId)
+    case flag of
+      Left _ -> say "dropped node" >> modifyState (removeFinger node) >> return False
+      Right _ -> do resp <- receiveTimeout 10000000 [match return] :: Process (Maybe ProcessId)
+                    case resp of
+                      Nothing -> do modifyState (removeFinger node)
+                                    say "dropped node"
+                                    return False
+                      Just pid -> return True
 -}
 
 -- | Utility function that takes a 'NodeState' and
@@ -364,7 +363,7 @@ checkPred = do st <- getState
 stabilize :: Process ()
 stabilize = do
   liftIO $ threadDelay 5000000 -- 5 sec
-  void $ checkPred
+  void checkPred
   checkFingerTable
   st <- getState
   case successor st of
@@ -439,16 +438,15 @@ buildFingers buildNode = do
                           nums = [1 .. (m $ st)]
                       mapM_ f nodids
 
--- | Starts a Chord Node. It takes the initial state,
--- lookups other Chord-nodes
+-- | Starts a Chord Node and joins the network trough a list of peers.
+-- It takes the initial state, lookups other Chord-nodes
 -- on the LAN, starts state handeling, stabilizing etc.
 -- in the background and then runs 'joinChord' on the first
 -- and best node that's altready a member in the ring.
-bootstrap :: NodeState -> LocalNode -> Process ()
-bootstrap st myNode = do
+bootstrap :: NodeState -> LocalNode -> [NodeId] -> Process ()
+bootstrap st myNode peers = do
     let myNodeId = localNodeId myNode
     let st' = st { self = myNodeId , predecessor = myNodeId }
-    peers <- getPeers
     let peers' = filter (/= myNodeId) peers -- $ findPeerByRole peers "NODE" -- remove ourselves from peerlist
     void $
       if not (null peers')
@@ -482,14 +480,13 @@ handleState st' = do
     register "CHORD-NODE-STATE" myPid
     loop st'
   where loop :: NodeState -> Process ()
-        loop st = do
-            receiveWait
-              [ matchIf (\x -> case x of
-                                 (ReadState _) -> True
-                                 _ -> False) (\(ReadState pid) -> getSt st pid)
-              , matchIf (\x -> case x of
-                               (TakeState _) -> True
-                               _ -> False) (\(TakeState pid) -> modSt st pid) ]
+        loop st = receiveWait
+            [ matchIf (\x -> case x of
+                (ReadState _) -> True
+                _ -> False) (\(ReadState pid) -> getSt st pid)
+            , matchIf (\x -> case x of
+                (TakeState _) -> True
+                _ -> False) (\(TakeState pid) -> modSt st pid) ]
             >>= loop
         getSt st pid = do
           send pid (RetReadState st)

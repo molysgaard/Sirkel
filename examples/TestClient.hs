@@ -37,16 +37,28 @@ import qualified Control.Distributed.Process.DHT.DHash as DHash
 import Control.Distributed.Process.DHT.Chord
 import Control.Distributed.Process.DHT.DHash
 
+import System.Console.CmdArgs.Implicit
+
+import Control.Distributed.Backend.P2P (makeNodeId)
+
+data Options = Options{port :: Int, peers :: [String]} deriving (Show, Data, Typeable)
+options = Options{
+            port = def &= help "TCP Port to run on" &= opt (2552 :: Int),
+            peers = def &= help "NodeId of already connected peer, if not supplied a new chord ring will be started."}
+            &= summary "TestClient v1"
+
 main = do
-    Right transport <- createTransport "127.0.0.1" "8080" defaultTCPParameters
+    args <- cmdArgs options
+    print args
+    Right transport <- createTransport "127.0.0.1" (show (port args)) defaultTCPParameters
     let rtable = Chord.__remoteTable . Chord.__remoteTableDecl $ initRemoteTable
-    node <- newLocalNode transport rtable
-    runProcess node $ do
-      bootstrap initState node -- ^ Start the chord ring
-      spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
-      ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
-      spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
-      userInput -- ^ this is for debug, it's our window into whats happening ;)
+    self <- newLocalNode transport rtable -- ^ this is ourselves
+    runProcess self $ do
+        bootstrap initState self (map makeNodeId (peers args))-- ^ Start a _new_ chord ring containing only us.
+        spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
+        ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
+        spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
+        userInput -- ^ this is for debug, it's our window into whats happening ;)
 
 -- {{{ userInput
 -- | debug function, reads a 0.[0-9] number from command line and runs findSuccessors on it in the DHT
@@ -54,9 +66,9 @@ userInput :: Process ()
 userInput = do line <- liftIO $ hGetLine stdin
                st <- getState
                let x = 2^160 :: Integer
-                   fm :: Integer -> Double
-                   fm = fromRational . (% x)
-                   sh = (take 5) . show
+                   --fm :: Integer -> Double
+                   --fm = fromRational . (% x)
+                   --sh = (take 5) . show
                case (take 3 line) of
                   "put" -> do holder <- putObject (drop 4 line)
                               say . show . (map fst) $ holder
@@ -66,14 +78,14 @@ userInput = do line <- liftIO $ hGetLine stdin
                               tmp_howMany <- liftIO $ hGetLine stdin
                               let howMany = read tmp_howMany :: Int
                               succ <- Chord.findSuccessors num howMany
-                              say $ show . (map (fm . cNodeId)) $ succ
+                              say $ show . (map (cNodeId)) $ succ
                   "del" -> do let num = ((read (drop 4 line)) :: Integer)
                               succ <- deleteBlock num
                               say $ "Trying to delete: " ++ (show num)
                   "sta" -> do st <- getState
                               say (show st)
                   "id" -> do st <- getState
-                             say $ sh . fm . cNodeId . self $ st
+                             say $ show . cNodeId . self $ st
                   _ -> return ()
                userInput
 -- }}}
@@ -98,9 +110,9 @@ randomFinds = do
   key <- liftIO $ randomRIO (1, 2^(m st)) :: Process Integer
   succ <- findSuccessors key (r st)
   let x = 2^(m $ st) :: Integer
-      fm :: Integer -> Double
-      fm = fromRational . (% x)
+      --fm :: Integer -> Double
+      --fm = fromRational . (% x)
       --sh = (take 5) . show
-  --say $ (sh . fm . cNodeId . self $ st) ++ " says succ " ++ (sh . fm $ key) ++ " is " ++ (sh . fm . cNodeId $ succ)
+  --say $ (show . cNodeId . self $ st) ++ " says succ " ++ (show key) ++ " is " ++ (concatMap (show . cNodeId) succ)
   randomFinds
 -- }}}
