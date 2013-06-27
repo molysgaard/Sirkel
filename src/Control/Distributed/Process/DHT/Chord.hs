@@ -22,12 +22,13 @@ import Data.Binary
 import Data.Digest.Pure.SHA
 import Data.Int (Int64)
 import qualified Data.Map as Map
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust,isJust)
 import qualified Data.List as List
 import Data.Typeable
 import GHC.Generics
 import Control.Concurrent (threadDelay)
-import Control.Monad (liftM,void,when)
+import Control.Concurrent.MVar
+import Control.Monad (liftM,void,when,forever)
 
 import Control.Distributed.Process
 import Control.Distributed.Process.Closure
@@ -317,20 +318,18 @@ joinChord node = do
 
 -- | 'checkAlive' checks if a single node is alive, if it's
 -- not we'll discard it from our 'fingerTable'.
-checkAlive node = return True
-{- TODO: re-write.
+checkAlive :: NodeId -> Process Bool
 checkAlive node = do
-    pid <- getSelfPid
-    flag <- try $ spawn node ($(mkClosure 'ping) pid) -- :: Process (Either TransmitException ProcessId)
-    case flag of
-      Left _ -> say "dropped node" >> modifyState (removeFinger node) >> return False
-      Right _ -> do resp <- receiveTimeout 10000000 [match return] :: Process (Maybe ProcessId)
-                    case resp of
-                      Nothing -> do modifyState (removeFinger node)
-                                    say "dropped node"
-                                    return False
-                      Just pid -> return True
--}
+    mv <- liftIO newEmptyMVar
+    catchExit
+      (void $ spawnLocal $ do
+        whereisRemoteAsync node "ping-server"
+        reply <- expectTimeout 10000000
+        case reply of
+          Just (WhereIsReply _str maybePid) -> liftIO (putMVar mv (isJust maybePid))
+          Nothing -> liftIO (putMVar mv False))
+      (\_from (_reason::String) -> liftIO (putMVar mv False))
+    liftIO $ takeMVar mv
 
 -- | Utility function that takes a 'NodeState' and
 -- returns all the 'NodeId's that we know
@@ -448,6 +447,8 @@ bootstrap st myNode peers = do
     let myNodeId = localNodeId myNode
     let st' = st { self = myNodeId , predecessor = myNodeId }
     let peers' = filter (/= myNodeId) peers -- $ findPeerByRole peers "NODE" -- remove ourselves from peerlist
+    pingServer <- spawnLocal (forever (expect :: Process String)) -- (won't actually receive messages, just used to register pid)
+    register "ping-server" pingServer
     void $
       if not (null peers')
        then do
