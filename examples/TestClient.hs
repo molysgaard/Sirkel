@@ -41,20 +41,18 @@ import System.Console.CmdArgs.Implicit
 
 import Control.Distributed.Backend.P2P (makeNodeId)
 
-data Options = Options{port :: Int, peers :: [String]} deriving (Show, Data, Typeable)
+data Options = Options{port :: Int, nodes :: [String]} deriving (Show, Data, Typeable)
 options = Options{
-            port = def &= help "TCP Port to run on" &= opt (2552 :: Int),
-            peers = def &= help "NodeId of already connected peer, if not supplied a new chord ring will be started."}
-            &= summary "TestClient v1"
+            port = def &= help "TCP Port to run on",
+            nodes = def &= help "ip:port of already connected peer, if not supplied a new chord ring will be started. e.g. \"127.0.0.1:8099\""}
 
 main = do
-    args <- cmdArgs options
-    print args
+    args <- getOpts -- cmdArgs options
     Right transport <- createTransport "127.0.0.1" (show (port args)) defaultTCPParameters
     let rtable = Chord.__remoteTable . Chord.__remoteTableDecl $ initRemoteTable
     self <- newLocalNode transport rtable -- ^ this is ourselves
     runProcess self $ do
-        bootstrap initState self (map makeNodeId (peers args))-- ^ Start a _new_ chord ring containing only us.
+        bootstrap initState self (map makeNodeId (nodes args)) -- ^ Start a _new_ chord ring containing only us.
         spawnLocal randomFinds -- ^ do some random lookups in the chord ring at intervals, just for debug
         ht <- liftIO $ HT.new -- ^ make a new empty hashtable, if we want we can use a non empty table, eg the one from last time the client run.
         spawnLocal $ initBlockStore ht -- ^ spawn the block store. this one handles puts, gets and deletes
@@ -116,3 +114,25 @@ randomFinds = do
   --say $ (show . cNodeId . self $ st) ++ " says succ " ++ (show key) ++ " is " ++ (concatMap (show . cNodeId) succ)
   randomFinds
 -- }}}
+
+
+------------
+-- command line usage
+
+getOpts :: IO Options
+getOpts = cmdArgs $ options
+    &= verbosityArgs [explicit, name "Verbose", name "V"] []
+    &= versionArg [explicit, name "version", name "v", summary _PROGRAM_INFO]
+    &= summary (_PROGRAM_INFO)
+    &= help _PROGRAM_ABOUT
+    &= helpArg [explicit, name "help", name "h"]
+    &= program _PROGRAM_NAME
+
+_PROGRAM_NAME :: String
+_PROGRAM_NAME = "TestClient"
+
+_PROGRAM_INFO :: String
+_PROGRAM_INFO = _PROGRAM_NAME
+
+_PROGRAM_ABOUT :: String
+_PROGRAM_ABOUT = "Simple interactive executable for Chord DHT"
