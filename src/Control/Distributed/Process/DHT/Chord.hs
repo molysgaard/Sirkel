@@ -342,6 +342,8 @@ fingerNodes st
   where nub = (map head) . List.group
         strip (FingerNode n) = n
 
+-- TODO: does it? checkAlive simply  returns a Bool, and
+--       checkFingerTable doesn't do anything.
 -- | 'checkFingerTable' checks if the nodes in our 'fingerTable' is alive
 -- and discards them if they're not
 checkFingerTable :: Process ()
