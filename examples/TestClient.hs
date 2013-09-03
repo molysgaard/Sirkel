@@ -2,8 +2,6 @@
 module Main where
 
 import Control.Distributed.Process
-import Control.Distributed.Process.Platform.Call
-import Control.Distributed.Process.Platform.Async
 import Control.Distributed.Process.Closure
 import Control.Distributed.Process.Node -- (initRemoteTable)
 import Network.Transport.TCP
